@@ -6,9 +6,10 @@ const el=(tag,text,cls)=>{const node=document.createElement(tag);if(text!==undef
 function message(text){$('status').textContent=text;}
 async function api(url,options={}){const response=await fetch(url,options);if(!response.ok){let error;try{error=(await response.json()).error;}catch{error='The local server did not respond. Restart the app and reload.';}throw new Error(error);}return response.json();}
 const patch=(url,data)=>api(url,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-const limit=(d,upper=false)=>Number((d.nominal+(upper?d.upperTol:d.lowerTol)).toFixed(8));
-function attention(report){return report.status==='ready'&&!report.excluded&&((report.missing??study.schema.length-report.matched)>0||(report.outside||0)>0);}
-function assessment(d,reading){if(reading?.value===null||reading?.value===undefined||reading.value==='')return 'Missing';const value=Number(reading.value);return value<limit(d)-1e-9||value>limit(d,true)+1e-9?'Outside base limits':'Within base limits';}
+const limit=(d,upper=false)=>{const tol=upper?d?.upperTol:d?.lowerTol;return d?.nominal===null||d?.nominal===undefined||tol===null||tol===undefined?null:Number((d.nominal+tol).toFixed(8));};
+const display=value=>value===null||value===undefined?'—':value;
+function attention(report){return report.status==='outdated'||report.status==='ready'&&!report.excluded&&((report.missing??study.schema.length-report.matched)>0||(report.outside||0)>0);}
+function assessment(d,reading){if(reading?.value===null||reading?.value===undefined||reading.value==='')return 'Missing';d=reading.definition||{};const lo=limit(d),hi=limit(d,true),value=Number(reading.value);if(lo===null&&hi===null)return 'Limits not specified';return lo!==null&&value<lo-1e-9||hi!==null&&value>hi+1e-9?'Outside base limits':'Within base limits';}
 function showView(name){document.querySelectorAll('.view').forEach(node=>node.hidden=node.id!==name);document.querySelectorAll('.nav').forEach(node=>node.classList.toggle('active',node.dataset.view===name));}
 for(const nav of document.querySelectorAll('.nav'))nav.addEventListener('click',()=>showView(nav.dataset.view));
 function render(){
@@ -17,11 +18,11 @@ function render(){
   $('total').textContent=reports.length;$('ready').textContent=ready.length;$('pending').textContent=`${pending.length} waiting / processing`;$('characteristicCount').textContent=study.schema.length;$('attention').textContent=reports.filter(attention).length;
   $('queueStatus').textContent=study.paused?`Queue paused · ${pending.length} pending`:pending.length?`● Processing queue · ${pending.length} remaining`:'● Queue up to date';
   $('pause').textContent=study.paused?'Resume queue':'Pause queue';
-  $('referenceCount').textContent=`${study.schema.length} characteristics`;$('reference').disabled=reports.length>0 || importing;
-  $('referenceName').textContent=study.referenceName||'110780-001 MAJORS · supplied column definitions';
-  $('export').disabled=importing||exporting||pending.length>0||!reports.length;
+  $('referenceCount').textContent=`${study.schema.length} PDF characteristics`;
+  $('reextract').disabled=importing||exporting||pending.length>0||!reports.length;
+  $('export').disabled=importing||exporting||pending.length>0||!reports.length||reports.some(r=>r.status==='outdated');
   $('newStudy').disabled=importing||exporting||pending.length>0;
-  renderReports();
+  renderReports();renderDefinitions();
 }
 function renderReports(){
   const term=$('search').value.toLowerCase(), filter=$('filter').value;
@@ -30,8 +31,8 @@ function renderReports(){
   $('reportRows').replaceChildren();
   for(const report of reports.slice((page-1)*pageSize,page*pageSize)){
     const row=el('tr');row.append(el('td',report.serial||'—'),el('td',report.name));
-    const status=el('td');status.append(el('span',report.excluded?'Excluded':report.status,'badge '+report.status));if(report.duplicateOf)status.append(el('p','Identical content','muted'));if(report.status==='failed'){const error=el('p',report.error,'muted');status.append(error);}row.append(status);
-    row.append(el('td',report.status==='ready'?`${report.matched} / ${study.schema.length}`:'—'),el('td',report.status==='ready'?`${report.missing??study.schema.length-report.matched} missing / ${report.outside||0} outside`:'—'));
+    const status=el('td');status.append(el('span',report.excluded?'Excluded':report.status,'badge '+report.status));if(report.duplicateOf)status.append(el('p','Identical content','muted'));if(['failed','outdated'].includes(report.status)){const error=el('p',report.error,'muted');status.append(error);}row.append(status);
+    row.append(el('td',report.status==='ready'?`${report.matched} results`:'—'),el('td',report.status==='ready'&&!report.excluded?`${report.missing??study.schema.length-report.matched} missing / ${report.outside||0} outside`:'—'));
     const action=el('td');
     if(report.status==='ready'){const open=el('button','Open report','secondary tiny');open.addEventListener('click',()=>openReport(report.id));action.append(open);}
     if(report.status==='failed'){
@@ -45,13 +46,13 @@ function renderReports(){
 }
 function renderDefinitions(){
   $('definitionRows').replaceChildren();
-  for(const d of study.schema){const row=el('tr');for(const text of [d.number,d.id,d.axis,d.nominal,limit(d),limit(d,true),d.units])row.append(el('td',text));$('definitionRows').append(row);}
+  for(const d of study.schema){const row=el('tr');for(const text of [d.number,d.id,d.axis,d.variants>1?'Varies by PDF':display(d.nominal),d.variants>1?'Varies by PDF':display(limit(d)),d.variants>1?'Varies by PDF':display(limit(d,true)),d.units||'—',d.variants||1])row.append(el('td',text));$('definitionRows').append(row);}
 }
 async function refresh(){
   try{study=await api('/api/study');render();}
   catch(error){message(error.message);}
 }
-function loadSettings(){for(const key of ['title','part','units'])$(key).value=study.metadata[key]||'';}
+function loadSettings(){for(const key of ['title','part'])$(key).value=study.metadata[key]||'';}
 async function upload(selected,retryId=null){
   if(importing||exporting)return;
   const files=[...selected].filter(f=>f.name.toLowerCase().endsWith('.pdf')).sort((a,b)=>(a.webkitRelativePath||a.name).localeCompare(b.webkitRelativePath||b.name,undefined,{numeric:true}));
@@ -75,15 +76,14 @@ $('folder').addEventListener('change',event=>{upload(event.target.files);event.t
 $('files').addEventListener('change',event=>{upload(event.target.files);event.target.value='';});
 $('search').addEventListener('input',()=>{page=1;renderReports();});$('filter').addEventListener('change',()=>{page=1;renderReports();});
 $('prev').addEventListener('click',()=>{page--;renderReports();});$('next').addEventListener('click',()=>{page++;renderReports();});
-$('saveSettings').addEventListener('click',async()=>{try{study=await patch('/api/study',{metadata:Object.fromEntries(['title','part','units'].map(k=>[k,$(k).value]))});message('Study details saved locally.');}catch(error){message(error.message);}});
+$('saveSettings').addEventListener('click',async()=>{try{study=await patch('/api/study',{metadata:Object.fromEntries(['title','part'].map(k=>[k,$(k).value]))});message('Study details saved locally.');}catch(error){message(error.message);}});
 $('pause').addEventListener('click',async()=>{try{study=await patch('/api/study',{paused:!study.paused});render();}catch(error){message(error.message);}});
 $('newStudy').addEventListener('click',async()=>{
   if(!confirm('Start a new study? Export the current workbook first. Previous source files remain on disk, but the app will open the new study.'))return;
-  try{study=await api('/api/new',{method:'POST'});fileCache.clear();page=1;loadSettings();render();renderDefinitions();$('referenceName').textContent='110780-001 MAJORS · supplied column definitions';showView('overview');message('New study created. Set the part details and reference before importing.');}catch(error){message(error.message);}
+  try{study=await api('/api/new',{method:'POST'});fileCache.clear();page=1;loadSettings();render();renderDefinitions();showView('overview');message('New study created. Import PDFs to discover their measurements and specifications.');}catch(error){message(error.message);}
 });
-$('reference').addEventListener('change',async event=>{
-  const file=event.target.files[0];if(!file)return;
-  try{const result=await api('/api/reference',{method:'POST',headers:{'X-File-Name':encodeURIComponent(file.name)},body:file});await refresh();renderDefinitions();message(`Loaded ${result.count} characteristic definitions. Historical serial values were not imported.`);}catch(error){message(error.message);}finally{event.target.value='';}
+$('reextract').addEventListener('click',async()=>{
+  try{study=await api('/api/reextract',{method:'POST'});render();showView('reports');message('Saved PDFs are queued for PDF-sourced extraction. Previous extraction JSON was backed up.');}catch(error){message(error.message);}
 });
 function showEvidence(d){
   const reading=detail.values[d.id];$('evidence').textContent=reading?`${d.id}\nPage ${reading.page||'manual'} · ${reading.method||'Manual entry'}\n${reading.source||'No extracted source text.'}\n${(reading.flags||[]).join('\n')}`:`${d.id}\nMissing: no unambiguous measurement was extracted. Enter a value only after checking the source PDF.`;
@@ -98,7 +98,7 @@ async function openReport(id){
     for(const d of study.schema){
       const reading=detail.values[d.id],row=el('tr'),label=el('td',d.id);label.tabIndex=0;label.addEventListener('click',()=>showEvidence(d));label.addEventListener('keydown',event=>{if(event.key==='Enter')showEvidence(d);});row.append(label);
       const valueCell=el('td'),input=document.createElement('input');input.type='number';input.step='any';input.value=reading?.value??'';input.setAttribute('aria-label',`Measured ${d.id}`);
-      input.addEventListener('input',()=>{const change=edited.get(d.id)||{};edited.set(d.id,{...change,value:input.value});$('detailMessage').textContent='Unsaved edits. Click Save changes to apply corrections.';});valueCell.append(input);row.append(valueCell,el('td',`${limit(d)} … ${limit(d,true)}`));
+      input.addEventListener('input',()=>{const change=edited.get(d.id)||{};edited.set(d.id,{...change,value:input.value});$('detailMessage').textContent='Unsaved edits. Click Save changes to apply corrections.';});valueCell.append(input);const spec=reading?.definition||{};row.append(valueCell,el('td',display(spec.nominal)),el('td',`${display(spec.upperTol)} / ${display(spec.lowerTol)}`),el('td',`${display(reading?.pmin)} / ${display(reading?.pmax)}`),el('td',`${display(limit(spec))} … ${display(limit(spec,true))}`));
       row.append(el('td',assessment(d,reading)));
       row.append(el('td',(reading?.flags||[]).join('; ')));$('measurementRows').append(row);
     }
@@ -126,5 +126,5 @@ $('export').addEventListener('click',async()=>{
     const url=URL.createObjectURL(await response.blob()),link=el('a');link.href=url;link.download='Part-study-results.xlsx';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('Excel workbook exported. Exceptions include only missing and outside-base-limit results. Other file information is in Source reports.');
   }catch(error){message(error.message);}finally{exporting=false;render();}
 });
-await refresh();if(study){loadSettings();renderDefinitions();message('Study restored from local storage. Select a folder to add reports.');}
+await refresh();if(study){loadSettings();renderDefinitions();message(study.reports.some(r=>r.status==='outdated')?'Existing reports use the old definitions. Click Re-extract PDFs to read all fields from the original PDFs.':'Study restored. Import PDFs to discover their own measurements and specifications.');}
 setInterval(refresh,2000);

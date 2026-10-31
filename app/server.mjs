@@ -1,22 +1,22 @@
 import http from 'node:http';
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, copyFile, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const data = path.join(root, '.part-study');
+const data = process.env.PART_STUDY_DATA_DIR || path.join(root, '.part-study');
 await mkdir(data, {recursive:true});
 const python = process.env.FAI_PYTHON || (process.platform === 'win32' ? path.join(root,'.venv/Scripts/python.exe') : 'python');
 const port = Number(process.env.PORT || 3210), origin = `http://127.0.0.1:${port}`;
 const uuid = value => /^[a-f0-9-]{36}$/.test(value || '');
 const readJSON = async file => JSON.parse(await readFile(file,'utf8'));
 async function save(file,value) { await writeFile(`${file}.tmp`,JSON.stringify(value)); await rename(`${file}.tmp`,file); }
-const defaults = await readJSON(path.join(root,'assets/characteristics.json'));
+const defaults = [];
 let study;
 try { study = await readJSON(path.join(data,'active.json')); }
-catch(error) { if(error.code !== 'ENOENT') throw error; study = {id:randomUUID(),metadata:{title:'Part study',part:'110780-001_MAJORS',units:'mm'},schema:defaults,reports:[],paused:false}; }
+catch(error) { if(error.code !== 'ENOENT') throw error; study = {id:randomUUID(),metadata:{title:'Part study',part:'',units:''},schema:defaults,reports:[],paused:false}; }
 const folder = () => path.join(data,study.id);
 await mkdir(folder(),{recursive:true});
 const persist = () => save(path.join(data,'active.json'),study);
@@ -25,16 +25,40 @@ let saves = Promise.resolve();
 function persistState() { const snapshot=JSON.stringify(study);saves=saves.catch(()=>{}).then(async()=>{await writeFile(path.join(data,'active.json.tmp'),snapshot);await rename(path.join(data,'active.json.tmp'),path.join(data,'active.json'));});return saves; }
 const docPath = id => path.join(folder(),`${id}.json`);
 for(const report of study.reports) if(['processing','uploading'].includes(report.status)) {report.status=report.status==='processing'?'queued':'failed';report.error='Previous process was interrupted; retry upload if needed.';}
+const definitions = new Map();
+const signatures = new Map();
+function addDefinitions(items) {
+  if(new Set([...definitions.keys(),...items.map(d=>d.id)]).size>1000)throw new Error('This study exceeds 1,000 discovered characteristics; split it into smaller studies.');
+  let added=false;
+  for(const d of items){
+    const signature=JSON.stringify([d.nominal,d.upperTol,d.lowerTol,d.units]);
+    if(!definitions.has(d.id)){definitions.set(d.id,{...d,number:definitions.size+1});signatures.set(d.id,new Set());added=true;}
+    signatures.get(d.id).add(signature);
+    definitions.get(d.id).variants=signatures.get(d.id).size;
+  }
+  study.schema=[...definitions.values()];
+  if(added)for(const report of study.reports){const present=new Set(report.presentIds||[]);report.missing=study.schema.filter(d=>!present.has(d.id)).length;}
+}
 function summarize(report,document) {
-  report.matched=0;report.missing=0;report.outside=0;
-  for(const d of study.schema){
-    const raw=document.values?.[d.id]?.value;
-    if(raw===null||raw===undefined||raw===''){report.missing++;continue;}
-    const value=Number(raw);report.matched++;
-    if(value<d.nominal+d.lowerTol-1e-9||value>d.nominal+d.upperTol+1e-9)report.outside++;
+  report.presentIds=Object.keys(document.values||{}).filter(id=>document.values[id]?.value!==null&&document.values[id]?.value!==undefined);
+  report.matched=report.presentIds.length;report.outside=0;report.unspecified=0;
+  const present=new Set(report.presentIds);report.missing=study.schema.filter(d=>!present.has(d.id)).length;
+  for(const reading of Object.values(document.values||{})){
+    if(reading.value===null||reading.value===undefined)continue;
+    const d=reading.definition||{},n=d.nominal;
+    const lo=n!==null&&n!==undefined&&d.lowerTol!==null&&d.lowerTol!==undefined?n+d.lowerTol:null;
+    const hi=n!==null&&n!==undefined&&d.upperTol!==null&&d.upperTol!==undefined?n+d.upperTol:null;
+    if(lo===null&&hi===null)report.unspecified++;
+    if((lo!==null&&reading.value<lo-1e-9)||(hi!==null&&reading.value>hi+1e-9))report.outside++;
   }
 }
-for(const report of study.reports)if(report.status==='ready')summarize(report,await readJSON(docPath(report.id)));
+for(const report of study.reports)if(report.status==='ready'){
+  const document=await readJSON(docPath(report.id));
+  if(document.extractionVersion!==2){report.status='outdated';report.error='Re-extract this PDF to obtain its own nominal, tolerance and measurement fields.';}
+  else {if(!report.excluded)addDefinitions(document.definitions||[]);summarize(report,document);}
+}
+study.extractionVersion=2;study.schema=[...definitions.values()];
+const view=()=>({...study,reports:study.reports.map(({presentIds,...report})=>report)});
 await persist();
 let running = false;
 function worker(args) {
@@ -53,10 +77,11 @@ async function processQueue() {
   running=true;report.status='processing';
   try {
     await persistState();
-    const schemaPath=path.join(folder(),'schema.json');await save(schemaPath,study.schema);
-    const result=await worker(['scan',path.join(folder(),`${report.id}.pdf`),schemaPath,report.name]);
+    const result=await worker(['scan',path.join(folder(),`${report.id}.pdf`),report.name]);
     await save(docPath(report.id),{...result,id:report.id});
+    if(!report.excluded)addDefinitions(result.definitions||[]);
     summarize(report,result);
+    if(!study.metadata.part&&result.part)study.metadata.part=result.part;
     Object.assign(report,{status:'ready',serial:result.serial,part:result.part,revision:result.revision,matched:Object.keys(result.values).length,warnings:result.warnings,error:''});
   } catch(error) {report.status='failed';report.error=error.message;}
   finally {running=false;await persistState();setImmediate(processQueue);}
@@ -73,21 +98,28 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='GET' && ['/', '/app.js','/style.css'].includes(url.pathname)){
       const file=url.pathname==='/'?'index.html':url.pathname.slice(1);res.setHeader('Content-Type',file.endsWith('.html')?'text/html; charset=utf-8':file.endsWith('.js')?'text/javascript; charset=utf-8':'text/css; charset=utf-8');return res.end(await readFile(path.join(root,'public',file)));
     }
-    if(req.method==='GET' && url.pathname==='/api/study')return json(res,200,study);
+    if(req.method==='GET' && url.pathname==='/api/study')return json(res,200,view());
     if(req.method==='PATCH' && url.pathname==='/api/study'){
       const payload=await jsonBody(req);
       if(payload.metadata)for(const key of ['title','part','units'])if(typeof payload.metadata[key]==='string')study.metadata[key]=payload.metadata[key].slice(0,200);
       if(typeof payload.paused==='boolean')study.paused=payload.paused;
-      await persistState();setImmediate(processQueue);return json(res,200,study);
+      await persistState();setImmediate(processQueue);return json(res,200,view());
     }
     if(req.method==='POST' && url.pathname==='/api/new'){
       if(running || study.reports.some(r=>['queued','uploading'].includes(r.status)))return json(res,409,{error:'Finish the queue before starting another study.'});
-      study={id:randomUUID(),metadata:{title:'Part study',part:'',units:'mm'},schema:defaults,reports:[],paused:false};await mkdir(folder(),{recursive:true});await persistState();return json(res,200,study);
+      study={id:randomUUID(),metadata:{title:'Part study',part:'',units:''},schema:defaults,reports:[],paused:false};definitions.clear();signatures.clear();await mkdir(folder(),{recursive:true});await persistState();return json(res,200,view());
     }
-    if(req.method==='POST' && url.pathname==='/api/reference'){
-      if(study.reports.length)return json(res,409,{error:'Load the reference before importing PDFs, or start a new study.'});
-      const file=path.join(folder(),'reference.xlsx');await writeFile(file,await body(req,20*1024*1024));
-      study.schema=await worker(['reference',file]);study.referenceName=decodeURIComponent(req.headers['x-file-name']||'Custom reference workbook').slice(0,200);await persistState();return json(res,200,{count:study.schema.length});
+    if(req.method==='POST' && url.pathname==='/api/reextract'){
+      if(running||study.reports.some(r=>['queued','uploading'].includes(r.status)))return json(res,409,{error:'Wait for the current queue to finish first.'});
+      for(const report of study.reports){
+        try{
+          await stat(path.join(folder(),`${report.id}.pdf`));
+          try{await copyFile(docPath(report.id),path.join(folder(),`${report.id}.before-reextract-${randomUUID()}.json`));}catch(error){if(error.code!=='ENOENT')throw error;}
+          report.status='queued';report.error='';report.presentIds=[];report.matched=0;
+        }catch(error){report.status='failed';report.error='Source PDF unavailable: '+error.message;}
+      }
+      definitions.clear();signatures.clear();study.schema=[];study.paused=false;
+      await persistState();setImmediate(processQueue);return json(res,200,view());
     }
     if(req.method==='POST' && url.pathname==='/api/reports'){
       if(!req.headers['x-retry-id'] && study.reports.length>=5000)return json(res,400,{error:'The limit is 5,000 reports per study.'});
@@ -131,11 +163,18 @@ const server=http.createServer(async(req,res)=>{
         }
         if(typeof payload.excluded==='boolean')report.excluded=payload.excluded;
         summarize(report,document);
-        await save(docPath(report.id),document);await persistState();return json(res,200,{...document,...report});
+        await save(docPath(report.id),document);
+        if(typeof payload.excluded==='boolean'){
+          definitions.clear();signatures.clear();study.schema=[];
+          for(const other of study.reports)if(other.status==='ready'&&!other.excluded){const d=await readJSON(docPath(other.id));addDefinitions(d.definitions||[]);}
+          for(const other of study.reports){const present=new Set(other.presentIds||[]);other.missing=study.schema.filter(d=>!present.has(d.id)).length;}
+        }
+        await persistState();return json(res,200,{...document,...report});
       }
     }
     if(req.method==='POST' && url.pathname==='/api/export'){
       if(running || study.reports.some(r=>['queued','uploading','processing'].includes(r.status)))return json(res,409,{error:'Finish processing every queued report before exporting.'});
+      if(study.reports.some(r=>r.status==='outdated'))return json(res,409,{error:'Click Re-extract PDFs to replace the old Excel-derived fields before exporting.'});
       const reports=[];
       for(const report of study.reports){const doc=report.status==='ready'?await readJSON(docPath(report.id)):{};reports.push({...doc,...report});}
       const id=randomUUID(),input=path.join(folder(),`${id}.json`),output=path.join(folder(),`${id}.xlsx`);

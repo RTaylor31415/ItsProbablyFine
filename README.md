@@ -1,23 +1,23 @@
-# Part Study — offline batch inspection results
+# Part Study — offline PDF batch results
 
-Select a **folder of PDF inspection reports**, one report per serial/run, and compile their measured results into a readable Excel part study. Runs locally on Windows with Node.js, Python, and Tesseract. No cloud APIs, document uploads to outside services, or telemetry. Internet is only needed to install prerequisites.
+Import a folder of serial-number CMM inspection PDFs and export a readable Excel part study. Runs locally on Windows with Node.js, Python, and Tesseract. No cloud AI, telemetry, or external document processing.
 
-This redesign replaces the AS9102 workflow. The supplied `110780-001_MAJORS.xlsx` guides the layout and contributes **77 characteristic definitions**; its historical measurements are not bundled. The original AS9102 template is no longer used.
+**All measurement fields now come from the PDFs. No Excel reference or bundled characteristic list is used.** The Excel file supplied during design was only a layout example.
 
-## Windows installation
+## Install / update on Windows
 
-Install **Node.js 22+**, **Python 3.11+ with the Windows `py` launcher**, and **Tesseract OCR 5+ with English data**. See the Tesseract project's [installation guidance](https://tesseract-ocr.github.io/tessdoc/Installation.html) for Windows installers.
+Install Node.js 22+, Python 3.11+ with the `py` launcher, and Tesseract OCR 5+ with English data. Tesseract's [installation guidance](https://tesseract-ocr.github.io/tessdoc/Installation.html) lists Windows options.
 
-Download this repository with **Code → Download ZIP**, extract it, then open PowerShell in the extracted folder:
+Download the latest repository, open PowerShell in the extracted folder, and run:
 
 ```powershell
 .\setup.ps1
 .\start.ps1
 ```
 
-Open **http://127.0.0.1:3210** in Edge or Chrome. Stop the server with Ctrl+C. The startup script detects Tesseract at `C:\Program Files\Tesseract-OCR\tesseract.exe`. For another location, set `TESSERACT_CMD` to the executable path. A `.venv` created for the previous prototype must be refreshed with `setup.ps1` to install the new Excel writer.
+Open `http://127.0.0.1:3210` locally. Ctrl+C stops the server. **Rerun setup.ps1 when updating**: this version adds Pillow for table/cell OCR preprocessing. The startup script detects Tesseract at `C:\Program Files\Tesseract-OCR\tesseract.exe`. For another location, set `TESSERACT_CMD` to its executable path.
 
-If your organization's PowerShell policy restricts scripts, run the equivalent commands manually without changing the policy:
+If script execution is restricted by your organization's policy, run the equivalent commands manually without changing that policy:
 
 ```powershell
 py -3 -m venv .venv
@@ -27,47 +27,64 @@ $env:TESSERACT_CMD = 'C:\Program Files\Tesseract-OCR\tesseract.exe'
 node app/server.mjs
 ```
 
+Internet is needed to install prerequisites, but not to process reports afterward. Windows launch scripts require validation on a Windows workstation; development and browser tests run on Linux.
+
+## Existing studies: re-extract the saved PDFs
+
+Older versions stored Excel-derived definitions. Those extractions are now labelled **outdated** and cannot be exported as PDF-sourced results. Click **Re-extract PDFs** in Study overview. The app queues the PDFs already stored locally; uploading them again is unnecessary.
+
+Re-extraction replaces measurements and any manual corrections, and saves a backup of the previous extraction JSON beside the source PDF. It does not delete the PDFs. Exclusion choices are retained. No review/approval step is required before export.
+
 ## Bulk workflow
 
-No review or confirmation step is required. The Exceptions worksheet contains only **Missing** and **Outside base limits**. File failures, exclusions, duplicate serials, and other input warnings are recorded in Source reports instead. Once the queue finishes, results and base-limit exceptions are available automatically. You can optionally edit OCR values before export. Existing studies remain compatible; old review markers are ignored.
+1. Choose a folder, including subfolders, or select many PDFs. Non-PDF files are skipped. Use one part/revision per study.
+2. Files upload into a saved queue and process one at a time to bound local OCR memory. Uploading requires the browser to stay open; already uploaded files continue processing while the server runs. Pause takes effect after the current scan finishes. Failed files can be retried individually.
+3. The app discovers the characteristic columns from the reports. It reads dimension/feature/axis identifiers, units, nominal, printed +TOL/-TOL, measured result, DEV, OUTTOL, MIN, MAX, and BONUS where those fields are present.
+4. Serial results shows extracted and missing counts. Opening a report shows its own nominal, tolerances, and reported MIN/MAX beside the measurement and source PDF. Corrections are optional; **Save changes** updates the results immediately.
+5. Export when processing finishes. Exceptions contains only **Missing** or **Outside base limits**. File failures, duplicates, extraction notes, and annotation-without-table warnings remain in Source reports or Measurements.
 
-1. Enter the study name, part/drawing, and unit label, then **Save details**. Compile one part and revision per study. Values are never converted between units.
-2. For this example part, the 77 column definitions are already loaded. For another part, **Load reference .xlsx** before importing any PDFs. The reference needs rows labelled `PCD-ID`, `Nominal`, `U Tol`, and `L Tol`, with characteristics in columns. `Dimension ID` and `Axis` rows are recommended. Only definitions are read, never old serial results. Reference units default to mm; review the definitions before importing.
-3. Click **Choose folder**. All PDFs in the folder and subfolders enter the queue in natural filename order. Alternatively select many PDFs with **Select PDFs**. Non-PDF files are skipped. You can append another folder to the same study.
-4. **Serial results** shows per-file processing state and matched/missing counts. Uploading and extraction are separate: files queue quickly while one local extractor runs at a time to bound OCR memory. Pause stops new extraction jobs after the current file completes. Failed uploads/scans remain listed and can be retried individually.
-5. Open a report, edit its serial number, and inspect source evidence next to the measurement list. Click a characteristic to view its source page and OCR text. Enter missing values or correct OCR mistakes; extraction flags remain informational in Measurements. Click **Save changes** to apply corrections; assessments update automatically.
-6. Once the queue finishes, **Export Excel workbook**. Incomplete reports can be exported, with missing measurements recorded explicitly. Failed/excluded reports are listed but do not contribute measurements or statistics.
+The queue, source PDFs, corrections, and active study persist across browser refresh and server restart. Interrupted extraction resumes; interrupted uploads need retry. New study changes the active workspace but leaves previous files on disk; export before switching because there is no history browser yet.
 
-Serial numbers keep leading zeros. Reruns and duplicate serials remain separate rows, identified by source path; no results are silently overwritten. Identical PDF bytes are flagged. Exclude an unwanted duplicate in its details dialog. All included successful reports contribute to the statistics, so include/exclude reruns deliberately.
+Serial numbers retain leading zeros. Duplicate serials/reruns remain separate rows with their source paths. Identical PDF bytes are flagged; exclude unwanted duplicates in report details.
 
-The active study, uploaded PDFs, queue, and corrections survive browser refresh and server restart. Interrupted processing is requeued; interrupted uploads require retry. The browser must remain open until uploading finishes, but already uploaded files continue processing while the server runs. There is one active study; **New study** changes the active workspace, preserving previous files on disk. There is not yet a history browser: export a study before switching.
+## What each field means
 
-## Excel layout
+- **PDF nominal / +TOL / -TOL:** extracted from that report's table, not copied from another serial or a template.
+- **Lower/upper limits:** calculated as that PDF's nominal plus its printed tolerance. A blank tolerance stays blank; the app never substitutes zero or an Excel default.
+- **PDF MIN / MAX:** the values printed under MIN/MAX in the CMM report. These are separate from tolerance limits and from statistics across serials.
+- **Observed min / max:** calculated across included measured results in the study, not read from the PDF MIN/MAX columns.
+- **Unspecified limits:** a measured coordinate can have a nominal but blank tolerance cells. Its result is retained and its state is “Limits not specified.” That is not a missing measurement or an automatic failure.
 
-| Worksheet | Purpose |
+Every report keeps its own definitions. When specifications differ for the same identifier, shared workbook headers show **Varies by PDF**. Measurements retains the per-file fields, and outside-limit screening/highlighting uses each file's own limits. Bonus is retained but not automatically applied to conformance calculations. No pass/fail certification or Cp/Cpk is generated.
+
+Missing measurements are blank, never zero. Missing means either a row was unreadable, or an identifier found in another included PDF is absent from this report. An identifier absent from every PDF cannot be known automatically; an annotation with no readable table is reported as a source warning rather than supplied with invented fields.
+
+## Extraction improvements
+
+The parser targets the PC-DMIS/JEMCO CMM layout shown in the sample. It uses positioned text for vector PDFs. For raster tables it detects header columns, reads enlarged numeric/label cells, strips grid rules without erasing text strokes, recovers visible minus signs, and retries difficult axis labels/fields. Separate image-strip OCR finds table headings that whole-page OCR suppresses.
+
+Coordinates are associated with their printed feature within a table block. New identifiers are accepted directly from the PDF instead of rejected for not appearing in an Excel list. A truncated feature label can be resolved against a unique full label printed elsewhere in the **same PDF**, with a note retaining that provenance.
+
+OCR is not perfect. Source text and page references are retained. Unreadable fields stay blank; nominal/measured/deviation inconsistencies are noted. Manual checklist requirements without measured numeric results are not fabricated as CMM results. The parser does not interpret arbitrary GD&T drawings, infer missing general tolerances, convert units, or certify completeness across unfamiliar layouts.
+
+## Excel workbook
+
+| Sheet | Contents |
 |---|---|
-| Study overview | Part, units, file counts, measurement coverage, calculation notes |
-| Serial matrix | One row per included serial/run, 77 measurement columns for the example part, nominal/lower/upper reference rows, frozen serial and reference headers |
-| Characteristic summary | Results and missing counts, average, minimum, maximum, range, sample standard deviation, and base-limit screening |
-| Measurements | Filterable long-form results with PMin, PMax, bonus, assessment, page, extraction method, source text, and flags |
-| Exceptions | Only Missing and Outside base limits results from included, successfully parsed reports |
-| Source reports | Complete input register, including excluded/failed files, duplicates, and part/revision warnings |
+| Study overview | File counts, part, PDF-source rules and calculation notes |
+| Serial matrix | One row per included serial/run; shared PDF nominals/limits or “Varies by PDF”; frozen headers; own-limit highlighting |
+| Characteristic summary | Counts, missing, mean, observed min/max, range, sample deviation, and own-limit exception count |
+| Measurements | Per-report PDF fields, calculated limits, reported MIN/MAX, DEV/OUTTOL/BONUS, units, page, source text and notes |
+| Exceptions | Only missing measurements and results outside their PDF's available limits |
+| Source reports | Every input, including failed/excluded files and input warnings |
 
-Alternating row colors, consistent number formats, readable column widths, filters on detail sheets, print headers, and freeze panes replace the original dense layout. The wide matrix is intended for screen use; the filterable long-form Measurements sheet is easier to print or inspect by characteristic.
+Only included successful reports contribute results/statistics. PDF MIN/MAX are not mixed into population statistics. Standard deviation is blank with fewer than two results. Statistics are calculated at export, so Excel does not need to recalculate them. Regenerate the workbook after editing results.
 
-Statistics use **only measured result values** from included successful reports, across the entire study. PMin/PMax are stored separately, never mixed into the population. Missing results are blank rather than zero. Standard deviation is blank for fewer than two readings. Statistics are calculated at export, so Excel can show them immediately without recalculation; regenerate the report if data changes. Base-limit highlighting ignores blank cells. All numeric results, including position results, are compared to nominal plus the reference lower/upper tolerance. Bonus is not applied. This comparison runs automatically, regardless of any legacy review flag or extraction warning. There is no automatic pass/fail or capability certification, and no Cp/Cpk calculation.
+Limits: 5,000 reports per study; 50 MB and 200 pages per PDF; 1,000 discovered characteristics; 950,000 report × characteristic combinations per workbook; 15-minute timeout per scan. Very large raster batches can take hours. Excel worksheet rows stream to disk to reduce memory use.
 
-Exports stream worksheet rows to disk to reduce memory use. Limits: **5,000 reports**, **50 MB and 200 pages per PDF**, **1,000 characteristic definitions**, and **950,000 report × characteristic combinations per workbook**. Each scan has a 15-minute timeout. Processing many raster reports may take hours; queue state is saved between files. OCR speed depends on page complexity and the workstation. These are supported input limits, not a promise that every PDF layout can be read automatically.
+## Development and validation
 
-## Extraction accuracy
-
-The parser targets the PC-DMIS/JEMCO CMM layout shown in the supplied PDF. It supports ordinary size, radius, profile, and position tables, with separate coordinates, PMin/PMax, and bonus where readable. Measurement matching requires dimension + feature + axis identifiers. It does **not** assign unidentified values by row order or fuzzy-match `ar3` to `CIR_3`. Unknown/missing rows remain available for review and manual correction. Serial identifiers are extracted from the report header; filename fallback is flagged.
-
-Raster OCR can drop minus signs or misread labels. Nominal mismatches, repeated characteristics, and reversed PMin/PMax are flagged, but not every OCR error is detectable. Geometric tolerance, datum, MMC/LMC, bonus interpretation, manual checklists, and overall conformance remain human review tasks. The reference workbook supplies base limits; the app does not prove those definitions are appropriate for every report or revision. Reports from an unfamiliar layout may yield few or no matches.
-
-## Development / tests
-
-Linux/macOS also work with Node 22+, Python 3.11+, and Tesseract installed. Set `FAI_PYTHON` to your environment's Python if needed. Node has no npm dependencies.
+Linux/macOS also work with Node 22+, Python 3.11+, and Tesseract. Set `FAI_PYTHON` if your virtual environment's Python is not the default. There are no npm dependencies.
 
 ```sh
 python -m pip install -r requirements.txt
@@ -77,8 +94,10 @@ node --check public/app.js
 npm start
 ```
 
-Tests cover measured-column selection, coordinate/position/bonus separation, profile PMin/PMax, strict feature identity, OCR sign flags, reference import, blank versus zero handling, duplicate serial retention, exclusion/failure handling, literal Excel strings, and statistics across 1,000 synthetic serials. Development/browser validation runs on Linux; Windows launch scripts need verification on a Windows workstation.
+Tests create PDFs with previously unknown IDs and verify extraction without a template, blank tolerances, negative numbers, report-specific limits, differing specifications, reported versus observed MIN/MAX, missing versus zero results, no review gating, safe literal Excel text, and statistics across 1,000 serials. Old template-based extractions are explicitly rejected until re-extracted.
 
-## Local storage
+## Local files
 
-New studies are saved under ignored **`.part-study/`**; the previous prototype's `.local-fai/` is not imported. The server binds only to `127.0.0.1`, checks Host/Origin, uses subprocess argument lists rather than a shell, and writes document-derived text as literal Excel strings. Files and local JSON are not encrypted. Use a trusted single-user workstation and do not expose the port to the network. Back up `.part-study/` if you need to retain studies; stop the server before copying, restoring, or deleting that directory.
+Data is stored in ignored `.part-study/`. Back it up with the server stopped. Re-extraction backups are named `*.before-reextract-*.json`. The old `.local-fai/` prototype data is not imported automatically.
+
+The server binds only to `127.0.0.1`, checks Host/Origin, uses subprocess argument lists, and writes document text as literal Excel strings. Local files are not encrypted; use a trusted single-user workstation and do not expose the port to a network.

@@ -1,3 +1,4 @@
 PyMuPDF==1.26.6
 openpyxl==3.1.5
 XlsxWriter==3.2.9
+Pillow==12.3.0

@@ -1,127 +1,155 @@
 import copy
-import importlib.util
+import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from PIL import Image, ImageDraw
+
+import fitz
 import openpyxl
 
-spec=importlib.util.spec_from_file_location('worker',Path(__file__).resolve().parents[1]/'app/worker.py')
-worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
+import worker
+from pdf_extract import extract_text_tables,numeric,remove_minus,clean_rules
 
 
-def definition(identifier='JEM_13_14.CYL_B1.D.SIZE',nominal=11.5,axis='D'):
-    return dict(id=identifier,number=1,dimension='JEM_13_14',axis=axis,nominal=nominal,upperTol=.1,lowerTol=-.1,units='mm')
+def spec(id='JEM_901.ODA.SIZE',nominal=99.5,upper=.25,lower=-.15):
+    return dict(id=id,dimension='JEM_901',feature='ODA',axis='SIZE',nominal=nominal,upperTol=upper,lowerTol=lower,units='mm',number=1)
 
 
-def parse(text,schema):
-    return worker.parse_pages([dict(text=text,page=1,method='OCR')],schema)[0]
+def report(id='a',serial='001',value=99.6,definition=None):
+    d=definition or spec()
+    return dict(id=id,name=f'{serial}.pdf',serial=serial,status='ready',extractionVersion=2,definitions=[d],values={d['id']:dict(definition=d,value=value,pmin=99.55,pmax=99.65,bonus=None,flags=[],source='=1+1',page=1,method='PDF text')})
 
 
-class ParserTests(unittest.TestCase):
-    def test_size_measured_column_not_tolerance_or_deviation(self):
-        d=definition()
-        values=parse('JEM_13_14 Size | MM\nFeature NOMINAL +TOL -TOL MEAS DEV OUTTOL\nCYL_B1 11.5000 0.1000 0.1000 11.4978 -0.0022 0.0000',[d])
-        self.assertEqual(values[d['id']]['value'],11.4978)
-
-    def test_position_coordinate_and_bonus_are_kept_distinct(self):
-        schema=[definition('JEM_13_14.CYL_B1.TP',0,'DRF'),definition('JEM_13_14.CYL_B1.X',0,'X'),definition('JEM_13_14.CYL_B1.Y',0,'Y')]
-        text='''JEM_13_14 MM
-Feature AX NOMINAL +TOL -TOL MEAS DEV OUTTOL BONUS
-X 0.0000 -0.0045 -0.0045
-CYL_B1 Y 0.0000 0.0000 0.0000
-(START PT) TP 0.0000 0.1000 0.0000 0.0090 0.0090 0.0000 0.0978'''
-        v=parse(text,schema)
-        self.assertEqual(v[schema[0]['id']]['value'],.009)
-        self.assertEqual(v[schema[0]['id']]['bonus'],.0978)
-        self.assertEqual(v[schema[1]['id']]['value'],-.0045)
-        self.assertEqual(v[schema[2]['id']]['value'],0)
-        self.assertEqual(worker.assessment(schema[0],v[schema[0]['id']]),'Within base limits')
-
-    def test_unknown_feature_does_not_match_by_substring_or_order(self):
-        d=definition('JEM_13_14.CYL_1.D.SIZE')
-        v=parse('JEM_13_14 Size\nFeature NOMINAL +TOL -TOL MEAS DEV OUTTOL\nCYL_11 11.5000 0.1000 0.1000 11.4000 0.1000 0.0000',[d])
-        self.assertEqual(v,{})
-
-    def test_profile_result_and_pmin_pmax_are_separate(self):
-        d=definition('JEM_13_14.SCN4.M',0,'M')
-        v=parse('JEM_13_14 MM\nFeature NOMINAL +TOL MEAS MAX MIN OUTTOL\nSCN4 0.0000 0.5000 0.2755 0.1377 -0.0468 0.0000',[d])[d['id']]
-        self.assertEqual((v['value'],v['pmin'],v['pmax']),(.2755,-.0468,.1377))
-
-    def test_sign_mismatch_and_duplicate_values_are_flagged(self):
-        d=definition(nominal=-11.5)
-        line='CYL_B1 11.5000 0.1000 0.1000 11.4978 -0.0022 0.0000'
-        v=parse('JEM_13_14 Size\nFeature NOMINAL +TOL -TOL MEAS DEV OUTTOL\n'+line+'\n'+line,[d])[d['id']]
-        self.assertEqual(len(v['flags']),2)
-        self.assertEqual(worker.assessment(d,v),'Outside base limits')
+def table_pdf(path,nominal='99.5',measured='99.6',lower='0.15',upper='0.25',serial='001'):
+    document=fitz.open();page=document.new_page(width=842,height=595)
+    page.insert_text((40,30),f'PART NAME: TEST-PART SER NUMBER: {serial}',fontsize=10)
+    page.insert_text((40,60),'JEM_901 Size MM',fontsize=12)
+    xs=[40,180,280,370,460,560,650,730]
+    for x,t in zip(xs,['Feature','NOMINAL','+TOL','-TOL','MEAS','DEV','MAX','MIN']):page.insert_text((x,85),t,fontsize=12)
+    for x,t in zip(xs,['OD_A',nominal,upper,lower,measured,'0.1','99.65','99.55']):page.insert_text((x,115),t,fontsize=12)
+    document.save(path);document.close()
 
 
-class ExportTests(unittest.TestCase):
-    def report(self,id='a',serial='001_FINAL',value=11.5):
-        return dict(id=id,serial=serial,name='=HYPERLINK("bad")',status='ready',reviewed=True,values={'JEM_13_14.CYL_B1.D.SIZE':dict(value=value,pmin=-99,pmax=99,source='=1+1',flags=[],page=1,method='OCR')})
+def headers(sheet):return {c.value:c.column for c in next(sheet.iter_rows())}
 
-    def test_statistics_missing_exclusions_duplicate_and_literal_strings(self):
-        reports=[self.report(value=11.4),self.report('b',value=11.6),self.report('c','002',value=0),self.report('d','003',value=None),dict(id='e',name='failed.pdf',status='failed',error='Unreadable'),dict(self.report('f',value=999),excluded=True)]
+
+class PDFExtractionTests(unittest.TestCase):
+    def test_native_pdf_supplies_all_fields_without_any_template(self):
         with tempfile.TemporaryDirectory() as temp:
-            file=Path(temp)/'out.xlsx';worker.export(dict(schema=[definition()],reports=reports,metadata={}),file)
-            book=openpyxl.load_workbook(file,data_only=False)
-            self.assertEqual(book.sheetnames,['Study overview','Serial matrix','Characteristic summary','Measurements','Exceptions','Source reports'])
-            matrix=book['Serial matrix']
-            self.assertEqual(matrix.max_row,8)
-            self.assertEqual(matrix['A5'].value,'001_FINAL')
-            self.assertEqual(matrix['B5'].data_type,'s')
-            self.assertEqual(matrix['D7'].value,0)
-            self.assertIsNone(matrix['D8'].value)
-            self.assertEqual(matrix.freeze_panes,'D5')
-            stats=book['Characteristic summary']
-            self.assertEqual(stats['H2'].value,3)
-            self.assertEqual(stats['I2'].value,1)
-            self.assertAlmostEqual(stats['J2'].value,(11.4+11.6)/3)
-            self.assertEqual(book['Measurements']['I2'].value,-99)
-            self.assertEqual(book['Measurements']['O2'].data_type,'s')
-            self.assertIn('Duplicate serial',book['Source reports']['J2'].value)
-            self.assertEqual(book['Source reports'].max_row,7)
-            self.assertEqual(book['Measurements'].max_row,5)
+            file=Path(temp)/'test.pdf';table_pdf(file)
+            result=worker.scan(file,'test.pdf')
+            self.assertEqual(result['serial'],'001')
+            self.assertEqual(result['extractionVersion'],2)
+            self.assertEqual(len(result['definitions']),1)
+            d=result['definitions'][0];v=result['values'][d['id']]
+            self.assertEqual((d['nominal'],d['upperTol'],d['lowerTol']),(99.5,.25,-.15))
+            self.assertEqual((v['value'],v['pmin'],v['pmax']),(99.6,99.55,99.65))
+            self.assertEqual(worker.limits(d),(99.35,99.75))
 
-    def test_exceptions_only_missing_and_outside_without_review(self):
-        reports=[self.report(value=11.5),self.report('outside',value=12),self.report('missing',value=None),dict(id='failed',status='failed',name='broken.pdf',error='Unreadable')]
-        for report in reports:report['reviewed']=False
-        reports[0]['values'][definition()['id']]['flags']=['Nominal mismatch']
-        reports[1]['values'][definition()['id']]['flags']=['Mapping warning']
+    def test_blank_tolerance_stays_unspecified_not_zero(self):
         with tempfile.TemporaryDirectory() as temp:
-            file=Path(temp)/'out.xlsx';worker.export(dict(schema=[definition()],reports=reports),file)
-            book=openpyxl.load_workbook(file,data_only=True)
-            issues=[row[3] for row in book['Exceptions'].iter_rows(min_row=2,values_only=True)]
-            self.assertEqual(issues,['Outside base limits','Missing'])
-            self.assertEqual(book['Measurements']['L2'].value,'Within base limits')
-            self.assertEqual(book['Measurements']['L3'].value,'Outside base limits')
-            self.assertIn('Nominal mismatch',book['Measurements']['P2'].value)
-            for sheet in book:
-                self.assertFalse(any('review' in str(c.value).lower() for c in sheet[1]))
-            self.assertEqual(book['Source reports']['D5'].value,'failed')
+            file=Path(temp)/'test.pdf';table_pdf(file,upper='',lower='')
+            result=worker.scan(file,'test.pdf');v=next(iter(result['values'].values()))
+            self.assertIsNone(v['definition']['lowerTol'])
+            self.assertIsNone(v['definition']['upperTol'])
+            self.assertEqual(worker.limits(v['definition']),(None,None))
+            self.assertEqual(worker.assessment(v['definition'],v),'Limits not specified')
+
+    def test_new_unlisted_characteristic_not_rejected(self):
+        rows=extract_text_tables('JEM_987 Size MM\nFeature NOMINAL +TOL -TOL MEAS DEV\nNEW_FEATURE 50.0 0.2 0.3 49.9 -0.1')
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['id'],'JEM_987.NEWFEATURE.SIZE')
+        self.assertEqual(rows[0]['value'],49.9)
+
+    def test_negative_and_decimal_comma_parse(self):
+        self.assertEqual(numeric('-27,6013'),-27.6013)
+        self.assertEqual(numeric('0'),0)
+        self.assertIsNone(numeric('CIR_13'))
+        self.assertIsNone(numeric(''))
+
+    def test_grid_line_and_attached_minus_are_preserved_as_a_negative_sign(self):
+        image=Image.new('L',(160,60),255);draw=ImageDraw.Draw(image)
+        draw.rectangle((0,0,159,2),fill=0)
+        draw.ellipse((40,12,62,48),outline=0,width=4)
+        draw.rectangle((25,29,43,33),fill=0)
+        cleaned,negative=remove_minus(clean_rules(image))
+        self.assertTrue(negative)
+        self.assertEqual(cleaned.getpixel((28,31)),255)
+        self.assertLess(cleaned.getpixel((50,13)),160)
+
+    def test_single_sided_limits_only_check_printed_side(self):
+        d=spec(nominal=0,upper=.2,lower=None)
+        self.assertEqual(worker.assessment(d,dict(value=.3,definition=d)),'Outside base limits')
+        self.assertEqual(worker.assessment(d,dict(value=-.1,definition=d)),'Within base limits')
+
+
+class WorkbookTests(unittest.TestCase):
+    def export(self,payload,temp):
+        file=Path(temp)/'out.xlsx';worker.export(payload,file)
+        return openpyxl.load_workbook(file,data_only=True)
+
+    def test_each_pdf_uses_own_limits_even_if_an_excel_schema_is_passed(self):
+        a=report(value=99.8)
+        b=report('b','002',value=100.8,definition=spec(nominal=100.5,upper=.4,lower=-.4))
+        with tempfile.TemporaryDirectory() as temp:
+            book=self.export(dict(reports=[a,b],schema=[spec(nominal=0,upper=999,lower=-999)]),temp)
+            matrix=book['Serial matrix'];self.assertEqual(matrix['D2'].value,'Varies by PDF')
+            detail=book['Measurements'];h=headers(detail)
+            self.assertEqual(detail.cell(2,h['PDF nominal']).value,99.5)
+            self.assertEqual(detail.cell(3,h['PDF nominal']).value,100.5)
+            self.assertEqual(detail.cell(2,h['Assessment']).value,'Outside base limits')
+            self.assertEqual(detail.cell(3,h['Assessment']).value,'Within base limits')
+            self.assertEqual(book['Exceptions'].max_row,2)
             self.assertEqual(book['Characteristic summary']['O2'].value,1)
 
-    def test_large_batch_has_no_fixed_statistics_range(self):
-        reports=[self.report(str(i),str(i).zfill(4),11.4+i/10000) for i in range(1000)]
+    def test_reported_min_max_distinct_from_population_min_max_and_limits(self):
         with tempfile.TemporaryDirectory() as temp:
-            file=Path(temp)/'out.xlsx';worker.export(dict(schema=[definition()],reports=reports),file)
-            book=openpyxl.load_workbook(file,read_only=True,data_only=True)
+            book=self.export(dict(reports=[report(value=99.6),report('b','002',value=99.7)]),temp)
+            detail=book['Measurements'];h=headers(detail)
+            self.assertEqual(detail.cell(2,h['PDF MIN']).value,99.55)
+            self.assertEqual(detail.cell(2,h['PDF MAX']).value,99.65)
+            self.assertEqual(detail.cell(2,h['Lower limit']).value,99.35)
+            stats=book['Characteristic summary'];sh=headers(stats)
+            self.assertEqual(stats.cell(2,sh['Observed min']).value,99.6)
+            self.assertEqual(stats.cell(2,sh['Observed max']).value,99.7)
+            self.assertAlmostEqual(stats.cell(2,sh['Average']).value,99.65)
+
+    def test_missing_different_characteristic_not_missing_tolerances(self):
+        a=report();b=report('b','002',definition=spec('JEM_902.NEW.SIZE',nominal=0,upper=None,lower=None),value=0)
+        with tempfile.TemporaryDirectory() as temp:
+            book=self.export(dict(reports=[a,b]),temp)
+            issues=[r[3] for r in book['Exceptions'].iter_rows(min_row=2,values_only=True)]
+            self.assertEqual(issues,['Missing','Missing'])
+            self.assertEqual(book['Serial matrix']['E6'].value,0)
+            self.assertIsNone(book['Serial matrix']['D6'].value)
+
+    def test_no_review_gate_no_nonmeasurement_exceptions(self):
+        a=report(value=100);a['reviewed']=False;a['values'][spec()['id']]['flags']=['OCR warning']
+        failed=dict(id='failed',name='bad.pdf',status='failed',error='Unreadable')
+        with tempfile.TemporaryDirectory() as temp:
+            book=self.export(dict(reports=[a,failed]),temp)
+            self.assertEqual(book['Exceptions']['D2'].value,'Outside base limits')
+            self.assertEqual(book['Exceptions'].max_row,2)
+            self.assertIn('Unreadable',book['Source reports']['J3'].value)
+
+    def test_old_template_extraction_cannot_be_exported_as_pdf_sourced(self):
+        old=report();old.pop('extractionVersion')
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError,'Re-extract'):worker.export(dict(reports=[old]),Path(temp)/'out.xlsx')
+
+    def test_large_batch_stats_and_literal_excel_strings(self):
+        records=[report(str(i),str(i).zfill(4),99.5+i/10000) for i in range(1000)]
+        records[0]['name']='=HYPERLINK("bad")'
+        with tempfile.TemporaryDirectory() as temp:
+            book=self.export(dict(reports=records),temp)
             self.assertEqual(book['Serial matrix'].max_row,1004)
             self.assertEqual(book['Characteristic summary']['H2'].value,1000)
-            self.assertAlmostEqual(book['Characteristic summary']['J2'].value,11.44995)
-
-    def test_reference_reads_definitions_without_serial_results(self):
-        with tempfile.TemporaryDirectory() as temp:
-            file=Path(temp)/'ref.xlsx';book=openpyxl.Workbook();sheet=book.active
-            for row in [['PCD-ID','JEM_13_14.CYL_B1.D.SIZE'],['Dimension ID','JEM_13_14'],['Axis','D'],['Nominal',11.5],['U Tol',.1],['L Tol',-.1],['001_FINAL',999]]:sheet.append(row)
-            book.save(file);schema=worker.reference(file)
-            self.assertEqual(len(schema),1)
-            self.assertEqual(schema[0]['nominal'],11.5)
-            self.assertNotIn('value',schema[0])
-
-    def test_invalid_limits_rejected(self):
-        d=definition();d['lowerTol']=.1
-        with self.assertRaises(ValueError):worker.validate_schema([d])
-        with self.assertRaises(ValueError):worker.validate_schema([definition(),definition()])
+            self.assertAlmostEqual(book['Characteristic summary']['J2'].value,99.54995)
+            self.assertEqual(book['Serial matrix']['B5'].data_type,'s')
+            self.assertEqual(book['Measurements'].cell(2,headers(book['Measurements'])['Source text']).data_type,'s')
 
 
 if __name__=='__main__':unittest.main()
