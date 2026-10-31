@@ -7,13 +7,14 @@ function message(text){$('status').textContent=text;}
 async function api(url,options={}){const response=await fetch(url,options);if(!response.ok){let error;try{error=(await response.json()).error;}catch{error='The local server did not respond. Restart the app and reload.';}throw new Error(error);}return response.json();}
 const patch=(url,data)=>api(url,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 const limit=(d,upper=false)=>Number((d.nominal+(upper?d.upperTol:d.lowerTol)).toFixed(8));
-function attention(report){return report.status==='failed'||(report.status==='ready'&&(!report.reviewed || report.matched<study.schema.length || report.warnings?.length || report.duplicateOf));}
+function attention(report){return report.status==='ready'&&!report.excluded&&((report.missing??study.schema.length-report.matched)>0||(report.outside||0)>0);}
+function assessment(d,reading){if(reading?.value===null||reading?.value===undefined||reading.value==='')return 'Missing';const value=Number(reading.value);return value<limit(d)-1e-9||value>limit(d,true)+1e-9?'Outside base limits':'Within base limits';}
 function showView(name){document.querySelectorAll('.view').forEach(node=>node.hidden=node.id!==name);document.querySelectorAll('.nav').forEach(node=>node.classList.toggle('active',node.dataset.view===name));}
 for(const nav of document.querySelectorAll('.nav'))nav.addEventListener('click',()=>showView(nav.dataset.view));
 function render(){
   if(!study)return;
   const reports=study.reports, ready=reports.filter(r=>r.status==='ready'), pending=reports.filter(r=>['queued','processing','uploading'].includes(r.status));
-  $('total').textContent=reports.length;$('ready').textContent=ready.length;$('pending').textContent=`${pending.length} waiting / processing`;$('reviewed').textContent=ready.filter(r=>r.reviewed).length;$('attention').textContent=reports.filter(attention).length;
+  $('total').textContent=reports.length;$('ready').textContent=ready.length;$('pending').textContent=`${pending.length} waiting / processing`;$('characteristicCount').textContent=study.schema.length;$('attention').textContent=reports.filter(attention).length;
   $('queueStatus').textContent=study.paused?`Queue paused · ${pending.length} pending`:pending.length?`● Processing queue · ${pending.length} remaining`:'● Queue up to date';
   $('pause').textContent=study.paused?'Resume queue':'Pause queue';
   $('referenceCount').textContent=`${study.schema.length} characteristics`;$('reference').disabled=reports.length>0 || importing;
@@ -30,7 +31,7 @@ function renderReports(){
   for(const report of reports.slice((page-1)*pageSize,page*pageSize)){
     const row=el('tr');row.append(el('td',report.serial||'—'),el('td',report.name));
     const status=el('td');status.append(el('span',report.excluded?'Excluded':report.status,'badge '+report.status));if(report.duplicateOf)status.append(el('p','Identical content','muted'));if(report.status==='failed'){const error=el('p',report.error,'muted');status.append(error);}row.append(status);
-    row.append(el('td',report.status==='ready'?`${report.matched} / ${study.schema.length}`:'—'),el('td',report.reviewed?'Reviewed':'Not reviewed'));
+    row.append(el('td',report.status==='ready'?`${report.matched} / ${study.schema.length}`:'—'),el('td',report.status==='ready'?`${report.missing??study.schema.length-report.matched} missing / ${report.outside||0} outside`:'—'));
     const action=el('td');
     if(report.status==='ready'){const open=el('button','Open report','secondary tiny');open.addEventListener('click',()=>openReport(report.id));action.append(open);}
     if(report.status==='failed'){
@@ -97,9 +98,9 @@ async function openReport(id){
     for(const d of study.schema){
       const reading=detail.values[d.id],row=el('tr'),label=el('td',d.id);label.tabIndex=0;label.addEventListener('click',()=>showEvidence(d));label.addEventListener('keydown',event=>{if(event.key==='Enter')showEvidence(d);});row.append(label);
       const valueCell=el('td'),input=document.createElement('input');input.type='number';input.step='any';input.value=reading?.value??'';input.setAttribute('aria-label',`Measured ${d.id}`);
-      input.addEventListener('input',()=>{const change=edited.get(d.id)||{};edited.set(d.id,{...change,value:input.value});$('detailMessage').textContent='Unsaved edits. Saving changes resets this report’s review.';});valueCell.append(input);row.append(valueCell,el('td',`${limit(d)} … ${limit(d,true)}`));
-      row.append(el('td',!reading||reading.value===null?'Missing':reading.flags?.length?'Check mapping':detail.reviewed?'Reviewed':'Unreviewed'));
-      const flagCell=el('td');if(reading?.flags?.length){const clear=document.createElement('input');clear.type='checkbox';clear.setAttribute('aria-label',`Clear flag ${d.id}`);clear.addEventListener('change',()=>{const change=edited.get(d.id)||{value:reading.value};edited.set(d.id,{...change,clearFlags:clear.checked});});flagCell.append(clear);}row.append(flagCell);$('measurementRows').append(row);
+      input.addEventListener('input',()=>{const change=edited.get(d.id)||{};edited.set(d.id,{...change,value:input.value});$('detailMessage').textContent='Unsaved edits. Click Save changes to apply corrections.';});valueCell.append(input);row.append(valueCell,el('td',`${limit(d)} … ${limit(d,true)}`));
+      row.append(el('td',assessment(d,reading)));
+      row.append(el('td',(reading?.flags||[]).join('; ')));$('measurementRows').append(row);
     }
     $('rawPages').replaceChildren();
     for(const unmatched of detail.unmatched||[]) $('rawPages').append(el('pre',`Page ${unmatched.page}: ${unmatched.reason}\n${unmatched.source}`));
@@ -107,22 +108,22 @@ async function openReport(id){
     if(study.schema[0])showEvidence(study.schema[0]);if(!$('detail').open)$('detail').showModal();
   }catch(error){message(error.message);}
 }
-async function saveReport(reviewed){
-  $('saveReport').disabled=true;$('confirmReview').disabled=true;
+async function saveReport(){
+  $('saveReport').disabled=true;
   try{
     const serial=$('serial').value.trim();if(!serial)throw new Error('Enter a serial number.');
-    const payload={excluded:$('excluded').checked,reviewed};if(serial!==detail.serial)payload.serial=serial;if(edited.size)payload.values=Object.fromEntries(edited);
-    await patch(`/api/reports/${detail.id}`,payload);await refresh();await openReport(detail.id);$('detailMessage').textContent=reviewed?'Report marked reviewed. Missing measurements and remaining flags are still listed.':'Changes saved; report needs review.';
-  }catch(error){$('detailMessage').textContent=error.message;}finally{$('saveReport').disabled=false;$('confirmReview').disabled=false;}
+    const payload={excluded:$('excluded').checked};if(serial!==detail.serial)payload.serial=serial;if(edited.size)payload.values=Object.fromEntries(edited);
+    await patch(`/api/reports/${detail.id}`,payload);await refresh();await openReport(detail.id);$('detailMessage').textContent='Changes saved. Base-limit results updated automatically.';
+  }catch(error){$('detailMessage').textContent=error.message;}finally{$('saveReport').disabled=false;}
 }
-$('saveReport').addEventListener('click',()=>saveReport(false));$('confirmReview').addEventListener('click',()=>saveReport(true));
+$('saveReport').addEventListener('click',saveReport);
 function closeDetail(event){const dirty=edited.size||(detail&&($('serial').value!==detail.serial||$('excluded').checked!==!!detail.excluded));if(dirty&&!confirm('Discard unsaved report edits?')){event?.preventDefault();return;}$('detail').close();detail=null;edited.clear();$('pdf').removeAttribute('src');}
 $('closeDetail').addEventListener('click',closeDetail);$('detail').addEventListener('cancel',event=>{event.preventDefault();closeDetail();});
 $('export').addEventListener('click',async()=>{
   if(!study)return;exporting=true;render();message('Building the workbook from every included report…');
   try{
     const response=await fetch('/api/export',{method:'POST'});if(!response.ok)throw new Error((await response.json()).error);
-    const url=URL.createObjectURL(await response.blob()),link=el('a');link.href=url;link.download='Part-study-results.xlsx';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('Excel workbook exported. Unreviewed results, failed reports, duplicates, and missing values are documented.');
+    const url=URL.createObjectURL(await response.blob()),link=el('a');link.href=url;link.download='Part-study-results.xlsx';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('Excel workbook exported. Exceptions include only missing and outside-base-limit results. Other file information is in Source reports.');
   }catch(error){message(error.message);}finally{exporting=false;render();}
 });
 await refresh();if(study){loadSettings();renderDefinitions();message('Study restored from local storage. Select a folder to add reports.');}

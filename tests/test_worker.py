@@ -35,7 +35,7 @@ CYL_B1 Y 0.0000 0.0000 0.0000
         self.assertEqual(v[schema[0]['id']]['bonus'],.0978)
         self.assertEqual(v[schema[1]['id']]['value'],-.0045)
         self.assertEqual(v[schema[2]['id']]['value'],0)
-        self.assertEqual(worker.assessment(schema[0],v[schema[0]['id']],True),'Geometric review')
+        self.assertEqual(worker.assessment(schema[0],v[schema[0]['id']]),'Within base limits')
 
     def test_unknown_feature_does_not_match_by_substring_or_order(self):
         d=definition('JEM_13_14.CYL_1.D.SIZE')
@@ -52,7 +52,7 @@ CYL_B1 Y 0.0000 0.0000 0.0000
         line='CYL_B1 11.5000 0.1000 0.1000 11.4978 -0.0022 0.0000'
         v=parse('JEM_13_14 Size\nFeature NOMINAL +TOL -TOL MEAS DEV OUTTOL\n'+line+'\n'+line,[d])[d['id']]
         self.assertEqual(len(v['flags']),2)
-        self.assertEqual(worker.assessment(d,v,True),'Check mapping')
+        self.assertEqual(worker.assessment(d,v),'Outside base limits')
 
 
 class ExportTests(unittest.TestCase):
@@ -69,18 +69,36 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(matrix.max_row,8)
             self.assertEqual(matrix['A5'].value,'001_FINAL')
             self.assertEqual(matrix['B5'].data_type,'s')
-            self.assertEqual(matrix['E7'].value,0)
-            self.assertIsNone(matrix['E8'].value)
-            self.assertEqual(matrix.freeze_panes,'E5')
+            self.assertEqual(matrix['D7'].value,0)
+            self.assertIsNone(matrix['D8'].value)
+            self.assertEqual(matrix.freeze_panes,'D5')
             stats=book['Characteristic summary']
             self.assertEqual(stats['H2'].value,3)
             self.assertEqual(stats['I2'].value,1)
-            self.assertAlmostEqual(stats['K2'].value,(11.4+11.6)/3)
+            self.assertAlmostEqual(stats['J2'].value,(11.4+11.6)/3)
             self.assertEqual(book['Measurements']['I2'].value,-99)
-            self.assertEqual(book['Measurements']['P2'].data_type,'s')
-            self.assertIn('Duplicate serial',book['Source reports']['K2'].value)
+            self.assertEqual(book['Measurements']['O2'].data_type,'s')
+            self.assertIn('Duplicate serial',book['Source reports']['J2'].value)
             self.assertEqual(book['Source reports'].max_row,7)
             self.assertEqual(book['Measurements'].max_row,5)
+
+    def test_exceptions_only_missing_and_outside_without_review(self):
+        reports=[self.report(value=11.5),self.report('outside',value=12),self.report('missing',value=None),dict(id='failed',status='failed',name='broken.pdf',error='Unreadable')]
+        for report in reports:report['reviewed']=False
+        reports[0]['values'][definition()['id']]['flags']=['Nominal mismatch']
+        reports[1]['values'][definition()['id']]['flags']=['Mapping warning']
+        with tempfile.TemporaryDirectory() as temp:
+            file=Path(temp)/'out.xlsx';worker.export(dict(schema=[definition()],reports=reports),file)
+            book=openpyxl.load_workbook(file,data_only=True)
+            issues=[row[3] for row in book['Exceptions'].iter_rows(min_row=2,values_only=True)]
+            self.assertEqual(issues,['Outside base limits','Missing'])
+            self.assertEqual(book['Measurements']['L2'].value,'Within base limits')
+            self.assertEqual(book['Measurements']['L3'].value,'Outside base limits')
+            self.assertIn('Nominal mismatch',book['Measurements']['P2'].value)
+            for sheet in book:
+                self.assertFalse(any('review' in str(c.value).lower() for c in sheet[1]))
+            self.assertEqual(book['Source reports']['D5'].value,'failed')
+            self.assertEqual(book['Characteristic summary']['O2'].value,1)
 
     def test_large_batch_has_no_fixed_statistics_range(self):
         reports=[self.report(str(i),str(i).zfill(4),11.4+i/10000) for i in range(1000)]
@@ -89,7 +107,7 @@ class ExportTests(unittest.TestCase):
             book=openpyxl.load_workbook(file,read_only=True,data_only=True)
             self.assertEqual(book['Serial matrix'].max_row,1004)
             self.assertEqual(book['Characteristic summary']['H2'].value,1000)
-            self.assertAlmostEqual(book['Characteristic summary']['K2'].value,11.44995)
+            self.assertAlmostEqual(book['Characteristic summary']['J2'].value,11.44995)
 
     def test_reference_reads_definitions_without_serial_results(self):
         with tempfile.TemporaryDirectory() as temp:

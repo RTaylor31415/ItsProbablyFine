@@ -25,6 +25,16 @@ let saves = Promise.resolve();
 function persistState() { const snapshot=JSON.stringify(study);saves=saves.catch(()=>{}).then(async()=>{await writeFile(path.join(data,'active.json.tmp'),snapshot);await rename(path.join(data,'active.json.tmp'),path.join(data,'active.json'));});return saves; }
 const docPath = id => path.join(folder(),`${id}.json`);
 for(const report of study.reports) if(['processing','uploading'].includes(report.status)) {report.status=report.status==='processing'?'queued':'failed';report.error='Previous process was interrupted; retry upload if needed.';}
+function summarize(report,document) {
+  report.matched=0;report.missing=0;report.outside=0;
+  for(const d of study.schema){
+    const raw=document.values?.[d.id]?.value;
+    if(raw===null||raw===undefined||raw===''){report.missing++;continue;}
+    const value=Number(raw);report.matched++;
+    if(value<d.nominal+d.lowerTol-1e-9||value>d.nominal+d.upperTol+1e-9)report.outside++;
+  }
+}
+for(const report of study.reports)if(report.status==='ready')summarize(report,await readJSON(docPath(report.id)));
 await persist();
 let running = false;
 function worker(args) {
@@ -46,7 +56,8 @@ async function processQueue() {
     const schemaPath=path.join(folder(),'schema.json');await save(schemaPath,study.schema);
     const result=await worker(['scan',path.join(folder(),`${report.id}.pdf`),schemaPath,report.name]);
     await save(docPath(report.id),{...result,id:report.id});
-    Object.assign(report,{status:'ready',serial:result.serial,part:result.part,revision:result.revision,matched:Object.keys(result.values).length,reviewed:false,warnings:result.warnings,error:''});
+    summarize(report,result);
+    Object.assign(report,{status:'ready',serial:result.serial,part:result.part,revision:result.revision,matched:Object.keys(result.values).length,warnings:result.warnings,error:''});
   } catch(error) {report.status='failed';report.error=error.message;}
   finally {running=false;await persistState();setImmediate(processQueue);}
 }
@@ -84,7 +95,7 @@ const server=http.createServer(async(req,res)=>{
       const retry=req.headers['x-retry-id'];
       const report=retry?study.reports.find(r=>r.id===retry && r.status==='failed'):null;
       if(retry && !report)return json(res,409,{error:'Only failed reports can be retried.'});
-      const record=report||{id:randomUUID(),name,status:'uploading',reviewed:false,excluded:false};
+      const record=report||{id:randomUUID(),name,status:'uploading',excluded:false};
       if(!report)study.reports.push(record);
       else {record.status='uploading';record.error='';record.name=name;}
       await persistState();
@@ -107,7 +118,7 @@ const server=http.createServer(async(req,res)=>{
         const payload=await jsonBody(req);
         if(report.status!=='ready')return json(res,409,{error:'Wait until the report finishes processing.'});
         const document=await readJSON(docPath(report.id));
-        if(typeof payload.serial==='string'){report.serial=payload.serial.slice(0,120);document.serial=report.serial;report.reviewed=false;}
+        if(typeof payload.serial==='string'){report.serial=payload.serial.slice(0,120);document.serial=report.serial;}
         if(payload.values){
           for(const [id,reading] of Object.entries(payload.values)){
             if(!study.schema.some(d=>d.id===id))throw new Error('Unknown characteristic.');
@@ -117,11 +128,9 @@ const server=http.createServer(async(req,res)=>{
             const changed=value!==previous.value;
             document.values[id]={...previous,value,source:changed?`Manual correction; original: ${previous.source||'not extracted'}`:previous.source,method:changed?'Manual correction':previous.method,flags:reading.clearFlags?[]:previous.flags||[]};
           }
-          report.reviewed=false;
         }
         if(typeof payload.excluded==='boolean')report.excluded=payload.excluded;
-        if(typeof payload.reviewed==='boolean')report.reviewed=payload.reviewed;
-        document.reviewed=report.reviewed;report.matched=Object.values(document.values).filter(v=>v.value!==null).length;
+        summarize(report,document);
         await save(docPath(report.id),document);await persistState();return json(res,200,{...document,...report});
       }
     }

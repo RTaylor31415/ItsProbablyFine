@@ -29,31 +29,33 @@ node app/server.mjs
 
 ## Bulk workflow
 
+No review or confirmation step is required. The Exceptions worksheet contains only **Missing** and **Outside base limits**. File failures, exclusions, duplicate serials, and other input warnings are recorded in Source reports instead. Once the queue finishes, results and base-limit exceptions are available automatically. You can optionally edit OCR values before export. Existing studies remain compatible; old review markers are ignored.
+
 1. Enter the study name, part/drawing, and unit label, then **Save details**. Compile one part and revision per study. Values are never converted between units.
 2. For this example part, the 77 column definitions are already loaded. For another part, **Load reference .xlsx** before importing any PDFs. The reference needs rows labelled `PCD-ID`, `Nominal`, `U Tol`, and `L Tol`, with characteristics in columns. `Dimension ID` and `Axis` rows are recommended. Only definitions are read, never old serial results. Reference units default to mm; review the definitions before importing.
 3. Click **Choose folder**. All PDFs in the folder and subfolders enter the queue in natural filename order. Alternatively select many PDFs with **Select PDFs**. Non-PDF files are skipped. You can append another folder to the same study.
 4. **Serial results** shows per-file processing state and matched/missing counts. Uploading and extraction are separate: files queue quickly while one local extractor runs at a time to bound OCR memory. Pause stops new extraction jobs after the current file completes. Failed uploads/scans remain listed and can be retried individually.
-5. Open a report, verify its serial number, and inspect source evidence next to the measurement list. Click a characteristic to view its source page and OCR text. Enter missing values or correct OCR mistakes; clear mapping flags only after checking the source. **Save & mark reviewed** confirms that report. Saving edits alone resets its review.
-6. Once the queue finishes, **Export Excel workbook**. Unreviewed or incomplete reports can be exported, with their status recorded explicitly. Failed/excluded reports are listed but do not contribute measurements or statistics.
+5. Open a report, edit its serial number, and inspect source evidence next to the measurement list. Click a characteristic to view its source page and OCR text. Enter missing values or correct OCR mistakes; extraction flags remain informational in Measurements. Click **Save changes** to apply corrections; assessments update automatically.
+6. Once the queue finishes, **Export Excel workbook**. Incomplete reports can be exported, with missing measurements recorded explicitly. Failed/excluded reports are listed but do not contribute measurements or statistics.
 
-Serial numbers keep leading zeros. Reruns and duplicate serials remain separate rows, identified by source path; no results are silently overwritten. Identical PDF bytes are flagged. Exclude an unwanted duplicate in its review dialog. All included successful reports contribute to the statistics, so include/exclude reruns deliberately.
+Serial numbers keep leading zeros. Reruns and duplicate serials remain separate rows, identified by source path; no results are silently overwritten. Identical PDF bytes are flagged. Exclude an unwanted duplicate in its details dialog. All included successful reports contribute to the statistics, so include/exclude reruns deliberately.
 
-The active study, uploaded PDFs, queue, corrections, and reviews survive browser refresh and server restart. Interrupted processing is requeued; interrupted uploads require retry. The browser must remain open until uploading finishes, but already uploaded files continue processing while the server runs. There is one active study; **New study** changes the active workspace, preserving previous files on disk. There is not yet a history browser: export a study before switching.
+The active study, uploaded PDFs, queue, and corrections survive browser refresh and server restart. Interrupted processing is requeued; interrupted uploads require retry. The browser must remain open until uploading finishes, but already uploaded files continue processing while the server runs. There is one active study; **New study** changes the active workspace, preserving previous files on disk. There is not yet a history browser: export a study before switching.
 
 ## Excel layout
 
 | Worksheet | Purpose |
 |---|---|
-| Study overview | Part, units, file counts, review coverage, calculation notes |
+| Study overview | Part, units, file counts, measurement coverage, calculation notes |
 | Serial matrix | One row per included serial/run, 77 measurement columns for the example part, nominal/lower/upper reference rows, frozen serial and reference headers |
-| Characteristic summary | Results and missing counts, reviewed count, average, minimum, maximum, range, sample standard deviation, and base-limit screening |
+| Characteristic summary | Results and missing counts, average, minimum, maximum, range, sample standard deviation, and base-limit screening |
 | Measurements | Filterable long-form results with PMin, PMax, bonus, assessment, page, extraction method, source text, and flags |
-| Exceptions | Missing/unreviewed readings, mapping issues, geometric review, base-limit exceptions, file failures, exclusions, duplicates, and part mismatch warnings |
-| Source reports | Complete input register, including excluded/failed files |
+| Exceptions | Only Missing and Outside base limits results from included, successfully parsed reports |
+| Source reports | Complete input register, including excluded/failed files, duplicates, and part/revision warnings |
 
 Alternating row colors, consistent number formats, readable column widths, filters on detail sheets, print headers, and freeze panes replace the original dense layout. The wide matrix is intended for screen use; the filterable long-form Measurements sheet is easier to print or inspect by characteristic.
 
-Statistics use **only measured result values** from included successful reports, across the entire study. PMin/PMax are stored separately, never mixed into the population. Missing results are blank rather than zero. Standard deviation is blank for fewer than two readings. Statistics are calculated at export, so Excel can show them immediately without recalculation; regenerate the report if data changes. Base-limit highlighting ignores blank cells. There is no automatic pass/fail or capability certification, and no Cp/Cpk calculation.
+Statistics use **only measured result values** from included successful reports, across the entire study. PMin/PMax are stored separately, never mixed into the population. Missing results are blank rather than zero. Standard deviation is blank for fewer than two readings. Statistics are calculated at export, so Excel can show them immediately without recalculation; regenerate the report if data changes. Base-limit highlighting ignores blank cells. All numeric results, including position results, are compared to nominal plus the reference lower/upper tolerance. Bonus is not applied. This comparison runs automatically, regardless of any legacy review flag or extraction warning. There is no automatic pass/fail or capability certification, and no Cp/Cpk calculation.
 
 Exports stream worksheet rows to disk to reduce memory use. Limits: **5,000 reports**, **50 MB and 200 pages per PDF**, **1,000 characteristic definitions**, and **950,000 report × characteristic combinations per workbook**. Each scan has a 15-minute timeout. Processing many raster reports may take hours; queue state is saved between files. OCR speed depends on page complexity and the workstation. These are supported input limits, not a promise that every PDF layout can be read automatically.
 

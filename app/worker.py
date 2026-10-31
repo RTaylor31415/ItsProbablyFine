@@ -231,7 +231,7 @@ def scan(file, schema, filename):
     if not values:
         warnings.append('No measurements matched this reference. Check the PDF format and characteristic definitions.')
     return dict(serial=serial, part=part[1] if part else '', revision=revision[1] if revision else '',
-                values=values, warnings=warnings+issues, unmatched=unmatched, pages=pages, reviewed=False,
+                values=values, warnings=warnings+issues, unmatched=unmatched, pages=pages,
                 serialSource='report' if 'Serial inferred' not in '\n'.join(warnings) else 'filename')
 
 
@@ -239,15 +239,9 @@ def limits(d):
     return round(d['nominal']+d['lowerTol'], 9), round(d['nominal']+d['upperTol'], 9)
 
 
-def assessment(d, reading, reviewed):
+def assessment(d, reading):
     if not reading or number(reading.get('value')) is None:
         return 'Missing'
-    if reading.get('flags'):
-        return 'Check mapping'
-    if not reviewed:
-        return 'Unreviewed'
-    if d['axis'] == 'DRF' or d['id'].endswith('.TP'):
-        return 'Geometric review'
     low, high = limits(d)
     return 'Outside base limits' if reading['value'] < low-1e-9 or reading['value'] > high+1e-9 else 'Within base limits'
 
@@ -307,11 +301,11 @@ def export(payload, output):
         raise ValueError('This study exceeds 950,000 measurements; split it into smaller studies.')
     writer=Writer(output)
     overview=writer.sheet('Study overview',['PART STUDY / MULTI-SERIAL RESULTS',''],{1:34,2:110})
-    matrix=writer.sheet('Serial matrix',['Serial number','Source report','Review','Missing count']+[d['id'] for d in schema],{1:22,2:48,3:18,4:16})
-    stats=writer.sheet('Characteristic summary',['Characteristic','Dimension','Axis','Units','Nominal','Lower limit','Upper limit','Results','Missing','Reviewed','Average','Min','Max','Range','Std dev (sample)','Outside base limits','Assessment rule'],{1:44,2:22,17:60})
-    detail=writer.sheet('Measurements',['Serial number','Source report','Characteristic','Axis','Nominal','Lower limit','Upper limit','Measured','PMin','PMax','Bonus','Assessment','Review','Page','Extraction','Source text','Flags'],{1:22,2:42,3:44,12:25,16:85,17:70})
+    matrix=writer.sheet('Serial matrix',['Serial number','Source report','Missing count']+[d['id'] for d in schema],{1:22,2:48,3:16})
+    stats=writer.sheet('Characteristic summary',['Characteristic','Dimension','Axis','Units','Nominal','Lower limit','Upper limit','Results','Missing','Average','Min','Max','Range','Std dev (sample)','Outside base limits','Assessment rule'],{1:44,2:22,16:60})
+    detail=writer.sheet('Measurements',['Serial number','Source report','Characteristic','Axis','Nominal','Lower limit','Upper limit','Measured','PMin','PMax','Bonus','Assessment','Page','Extraction','Source text','Flags'],{1:22,2:42,3:44,12:25,15:85,16:70})
     exceptions=writer.sheet('Exceptions',['Serial number','Source report','Characteristic','Issue','Measured','Lower limit','Upper limit','Page'],{1:22,2:42,3:44,4:90})
-    sources=writer.sheet('Source reports',['Report ID','Serial number','Source path','Status','Included','Reviewed','Part read','Revision read','Matched','Missing','Warnings'],{1:38,2:22,3:60,11:95})
+    sources=writer.sheet('Source reports',['Report ID','Serial number','Source path','Status','Included','Part read','Revision read','Matched','Missing','Warnings'],{1:38,2:22,3:60,10:95})
     append=writer.append
     names={}
     for report in reports:
@@ -322,39 +316,38 @@ def export(payload, output):
     info=[('Study',meta.get('title','Part study')),('Part / drawing',meta.get('part','')),('Units',meta.get('units','mm')),
         ('Created UTC',datetime.now(timezone.utc).isoformat(timespec='seconds')),('Reports (all)',len(reports)),
         ('Included parsed reports',len(successful)),('Characteristics',len(schema)),
-        ('Reviewed reports',sum(bool(r.get('reviewed')) for r in successful)),
-        ('Notes','Reference base-limit screening only. Geometric tolerances, bonus, datums, and certification require separate review.'),
+        ('Notes','Reference base-limit screening only; this calculation does not apply geometric bonus or certify conformance.'),
         ('Missing data','Blank cells mean missing/unreadable, never zero. Failed and excluded reports are listed in Source reports.'),
         ('PMin / PMax','Retained separately in Measurements. Never mixed into population statistics.'),
-        ('Statistics','Calculated from included measured results at export, including unreviewed readings. Review counts are shown. No fixed B17:B200 ranges.'),
+        ('Statistics','Calculated automatically from included measured results at export. No review confirmation is required. No fixed B17:B200 ranges.'),
         ('Scope','Part-study compilation, not an AS9102 form. Included reports should describe the same part and revision.')]
     for item in info:append(overview,item)
     for label,key in [('Nominal','nominal'),('Lower limit',None),('Upper limit',None)]:
-        append(matrix,[label,None,None,None]+[d[key] if key else limits(d)[0 if label=='Lower limit' else 1] for d in schema])
+        append(matrix,[label,None,None]+[d[key] if key else limits(d)[0 if label=='Lower limit' else 1] for d in schema])
     for report in reports:
         values=report.get('values',{})
         warning=list(report.get('warnings',[]))
+        if report.get('error'):warning.append(report['error'])
         if names.get(report.get('serial'),0)>1:warning.append('Duplicate serial / rerun: retained as a separate report')
         if report.get('duplicateOf'):warning.append('Identical PDF content: '+report['duplicateOf'])
         if len(revisions)>1:warning.append('Mixed drawing revisions in study: '+', '.join(revisions))
         if meta.get('part') and report.get('part') and normalized(meta['part'])!=normalized(report['part']):warning.append('Part differs from study; verify before combining')
-        append(sources,[report['id'],report.get('serial'),report.get('name'),report.get('status'),'No' if report.get('excluded') else 'Yes','Yes' if report.get('reviewed') else 'No',report.get('part'),report.get('revision'),sum(v.get('value') is not None for v in values.values()),sum(values.get(d['id'],{}).get('value') is None for d in schema),' | '.join(warning)])
+        append(sources,[report['id'],report.get('serial'),report.get('name'),report.get('status'),'No' if report.get('excluded') else 'Yes',report.get('part'),report.get('revision'),sum(v.get('value') is not None for v in values.values()),sum(values.get(d['id'],{}).get('value') is None for d in schema),' | '.join(warning)])
         if report.get('status')!='ready' or report.get('excluded'):
-            append(exceptions,[report.get('serial'),report.get('name'),'','Excluded' if report.get('excluded') else report.get('error',report.get('status')),None,None,None,None]);continue
-        if warning:append(exceptions,[report.get('serial'),report.get('name'),'',' | '.join(warning),None,None,None,None])
-        append(matrix,[report.get('serial'),report.get('name'),'Reviewed' if report.get('reviewed') else 'Unreviewed',sum(values.get(d['id'],{}).get('value') is None for d in schema)]+[values.get(d['id'],{}).get('value') for d in schema])
+            continue
+        append(matrix,[report.get('serial'),report.get('name'),sum(values.get(d['id'],{}).get('value') is None for d in schema)]+[values.get(d['id'],{}).get('value') for d in schema])
         for d in schema:
             reading=values.get(d['id'],{})
-            value=number(reading.get('value'));low,high=limits(d);status=assessment(d,reading,report.get('reviewed'))
-            append(detail,[report.get('serial'),report.get('name'),d['id'],d['axis'],d['nominal'],low,high,value,reading.get('pmin'),reading.get('pmax'),reading.get('bonus'),status,'Yes' if report.get('reviewed') else 'No',reading.get('page'),reading.get('method'),reading.get('source'),' | '.join(reading.get('flags',[]))])
-            if status!='Within base limits':append(exceptions,[report.get('serial'),report.get('name'),d['id'],status,value,low,high,reading.get('page')])
+            value=number(reading.get('value'));low,high=limits(d);status=assessment(d,reading)
+            append(detail,[report.get('serial'),report.get('name'),d['id'],d['axis'],d['nominal'],low,high,value,reading.get('pmin'),reading.get('pmax'),reading.get('bonus'),status,reading.get('page'),reading.get('method'),reading.get('source'),' | '.join(reading.get('flags',[]))])
+            if status in ('Missing','Outside base limits'):append(exceptions,[report.get('serial'),report.get('name'),d['id'],status,value,low,high,reading.get('page')])
     for d in schema:
         readings=[(r,r.get('values',{}).get(d['id'],{})) for r in successful]
         data=[number(v['value']) for r,v in readings if v.get('value') is not None]
         low,high=limits(d)
-        append(stats,[d['id'],d['dimension'],d['axis'],d.get('units',meta.get('units','mm')),d['nominal'],low,high,len(data),len(successful)-len(data),sum(bool(r.get('reviewed')) and v.get('value') is not None for r,v in readings),statistics.mean(data) if data else None,min(data) if data else None,max(data) if data else None,max(data)-min(data) if data else None,statistics.stdev(data) if len(data)>1 else None,sum(v<low-1e-9 or v>high+1e-9 for v in data) if not d['id'].endswith('.TP') else None,'Geometric review (no automatic acceptance)' if d['id'].endswith('.TP') else 'Reference base limits; not certification'])
-    matrix['sheet'].freeze_panes(4,4);matrix['sheet'].repeat_rows(0,3);matrix['sheet'].set_row(0,90)
-    for i,d in enumerate(schema,4):
+        append(stats,[d['id'],d['dimension'],d['axis'],d.get('units',meta.get('units','mm')),d['nominal'],low,high,len(data),len(successful)-len(data),statistics.mean(data) if data else None,min(data) if data else None,max(data) if data else None,max(data)-min(data) if data else None,statistics.stdev(data) if len(data)>1 else None,sum(v<low-1e-9 or v>high+1e-9 for v in data),'Reference base limits only; bonus not applied; not certification'])
+    matrix['sheet'].freeze_panes(4,3);matrix['sheet'].repeat_rows(0,3);matrix['sheet'].set_row(0,90)
+    for i,d in enumerate(schema,3):
         matrix['sheet'].set_column(i,i,23)
         letter=get_column_letter(i+1)
         if matrix['row']>4:
