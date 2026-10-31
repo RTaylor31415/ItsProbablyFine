@@ -1,11 +1,13 @@
 {
-  "name": "local-fai",
-  "version": "0.1.0",
+  "name": "local-part-study",
+  "version": "0.2.0",
   "private": true,
-  "description": "Offline PDF characteristic review and AS9102 workbook export",
+  "description": "Offline bulk serial inspection PDF import and Excel part-study results",
   "scripts": {
     "start": "node app/server.mjs",
     "test": "python -m unittest discover -s tests -v"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }

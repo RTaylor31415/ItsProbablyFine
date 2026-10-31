@@ -1,112 +1,129 @@
-const $ = id => document.getElementById(id);
-let state = { metadata: {}, rows: [], documents: [], coverageConfirmed: false };
-let selected = null;
-let scanning = false;
-const metadata = [['partNumber','Part number'],['partName','Part name'],['partRevision','Part revision'],['drawingNumber','Drawing number'],['drawingRevision','Drawing revision'],['serialNumber','Serial number'],['fairId','FAIR identifier'],['purchaseOrder','Purchase order']];
-function status(text) { $('status').textContent = text; }
-function element(tag, text, className) { const el = document.createElement(tag); if(text !== undefined) el.textContent = text; if(className) el.className = className; return el; }
-function field(name, label, value, onChange, wide=false) {
-  const wrap = element('label', label, wide ? 'full' : '');
-  const input = document.createElement(name === 'requirement' || name === 'comments' ? 'textarea' : 'input');
-  input.value = value ?? ''; input.name = name;
-  if(['lower','upper','resultMin','resultMax','quantity'].includes(name)) { input.type = 'number'; input.step = 'any'; }
-  input.addEventListener('input', () => onChange(input.value)); wrap.append(input); return wrap;
+const $=id=>document.getElementById(id);
+let study=null, page=1, importing=false, exporting=false, detail=null;
+const fileCache=new Map(), edited=new Map();
+const pageSize=50;
+const el=(tag,text,cls)=>{const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node;};
+function message(text){$('status').textContent=text;}
+async function api(url,options={}){const response=await fetch(url,options);if(!response.ok){let error;try{error=(await response.json()).error;}catch{error='The local server did not respond. Restart the app and reload.';}throw new Error(error);}return response.json();}
+const patch=(url,data)=>api(url,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+const limit=(d,upper=false)=>Number((d.nominal+(upper?d.upperTol:d.lowerTol)).toFixed(8));
+function attention(report){return report.status==='failed'||(report.status==='ready'&&(!report.reviewed || report.matched<study.schema.length || report.warnings?.length || report.duplicateOf));}
+function showView(name){document.querySelectorAll('.view').forEach(node=>node.hidden=node.id!==name);document.querySelectorAll('.nav').forEach(node=>node.classList.toggle('active',node.dataset.view===name));}
+for(const nav of document.querySelectorAll('.nav'))nav.addEventListener('click',()=>showView(nav.dataset.view));
+function render(){
+  if(!study)return;
+  const reports=study.reports, ready=reports.filter(r=>r.status==='ready'), pending=reports.filter(r=>['queued','processing','uploading'].includes(r.status));
+  $('total').textContent=reports.length;$('ready').textContent=ready.length;$('pending').textContent=`${pending.length} waiting / processing`;$('reviewed').textContent=ready.filter(r=>r.reviewed).length;$('attention').textContent=reports.filter(attention).length;
+  $('queueStatus').textContent=study.paused?`Queue paused · ${pending.length} pending`:pending.length?`● Processing queue · ${pending.length} remaining`:'● Queue up to date';
+  $('pause').textContent=study.paused?'Resume queue':'Pause queue';
+  $('referenceCount').textContent=`${study.schema.length} characteristics`;$('reference').disabled=reports.length>0 || importing;
+  $('referenceName').textContent=study.referenceName||'110780-001 MAJORS · supplied column definitions';
+  $('export').disabled=importing||exporting||pending.length>0||!reports.length;
+  $('newStudy').disabled=importing||exporting||pending.length>0;
+  renderReports();
 }
-function resetCoverage() { state.coverageConfirmed = false; $('coverage').checked = false; }
-function renderMetadata() { $('metadata').replaceChildren(...metadata.map(([key,label]) => field(key,label,state.metadata[key], value => {state.metadata[key]=value;}))); }
-function updateProgress() {
-  const included = state.rows.filter(r=>r.include);
-  $('count').textContent = state.rows.length;
-  $('progress').textContent = `${included.filter(r=>r.reviewed).length} of ${included.length} included characteristics reviewed · ${state.documents.length} PDF(s)`;
-  $('empty').hidden = state.rows.length > 0;
-  $('documents').replaceChildren();
-  for (const doc of state.documents) {
-    const button = element('button', `${doc.name} · ${doc.pages.length} pages${doc.warnings.length ? ' · Check warnings' : ''}`, 'secondary');
-    button.addEventListener('click', () => showSource({id:doc.id,documentId:doc.id,fileName:doc.name,page:1,reference:'Page 1',source:'Review all extracted pages below and use “Add manually” for missing characteristics.'}));
-    $('documents').append(button);
-  }
-}
-function showSource(row) {
-  selected = row.id;
-  document.querySelectorAll('.row').forEach(el=>el.classList.toggle('selected',el.dataset.id===row.id));
-  $('sourceLabel').textContent = `${row.fileName || 'Manual entry'} · ${row.reference || 'No reference'}`;
-  $('evidence').textContent = row.source || 'Manual characteristic. Enter a source reference and verify it against the original document.';
-  const doc = state.documents.find(d=>d.id===row.documentId);
-  $('pdf').hidden = !doc?.sourceUrl;
-  if(doc?.sourceUrl) $('pdf').src = `${doc.sourceUrl}#page=${row.page || 1}&view=FitH`;
-  else $('pdf').removeAttribute('src');
-  $('sourceHelp').textContent = doc && !doc.sourceUrl ? 'To view the original PDF after opening a saved review, select “Reconnect PDF” below. A restart clears server source links.' : 'Compare the original page with the extracted text. OCR can lose signs and GD&T symbols.';
-  $('pages').replaceChildren();
-  for(const d of (doc ? [doc] : state.documents)) {
-    $('pages').append(element('h3', d.name));
-    if(!d.sourceUrl) {
-      const reconnect = element('label','Reconnect PDF','button secondary'); const input = document.createElement('input'); input.type='file'; input.accept='.pdf'; input.hidden=true;
-      input.addEventListener('change',()=>{const file=input.files[0];if(file){d.sourceUrl=URL.createObjectURL(file);showSource(row);}}); reconnect.append(input);$('pages').append(reconnect);
+function renderReports(){
+  const term=$('search').value.toLowerCase(), filter=$('filter').value;
+  const reports=study.reports.filter(r=>(!term||`${r.serial||''} ${r.name}`.toLowerCase().includes(term))&&(filter==='all'||filter==='attention'&&attention(r)||filter==='ready'&&r.status==='ready'||filter==='failed'&&r.status==='failed'||filter==='queued'&&['queued','processing','uploading'].includes(r.status)));
+  const totalPages=Math.max(1,Math.ceil(reports.length/pageSize));page=Math.min(page,totalPages);
+  $('reportRows').replaceChildren();
+  for(const report of reports.slice((page-1)*pageSize,page*pageSize)){
+    const row=el('tr');row.append(el('td',report.serial||'—'),el('td',report.name));
+    const status=el('td');status.append(el('span',report.excluded?'Excluded':report.status,'badge '+report.status));if(report.duplicateOf)status.append(el('p','Identical content','muted'));if(report.status==='failed'){const error=el('p',report.error,'muted');status.append(error);}row.append(status);
+    row.append(el('td',report.status==='ready'?`${report.matched} / ${study.schema.length}`:'—'),el('td',report.reviewed?'Reviewed':'Not reviewed'));
+    const action=el('td');
+    if(report.status==='ready'){const open=el('button','Open report','secondary tiny');open.addEventListener('click',()=>openReport(report.id));action.append(open);}
+    if(report.status==='failed'){
+      const retry=el('button','Retry PDF','secondary tiny'),input=document.createElement('input');input.type='file';input.accept='.pdf';input.hidden=true;
+      retry.addEventListener('click',()=>{if(fileCache.has(report.id))upload([fileCache.get(report.id)],report.id);else input.click();});
+      input.addEventListener('change',()=>{if(input.files[0])upload([input.files[0]],report.id);});action.append(retry,input);
     }
-    for(const warning of d.warnings || []) $('pages').append(element('p',warning));
-    for(const p of d.pages || []) { const details=document.createElement('details'); details.append(element('summary',`Page ${p.page} · ${p.method} · ${p.candidates} candidates`),element('pre',p.text));$('pages').append(details); }
+    row.append(action);$('reportRows').append(row);
   }
+  $('reportCount').textContent=`${reports.length} reports`;$('pageNumber').textContent=`${page} / ${totalPages}`;$('prev').disabled=page<=1;$('next').disabled=page>=totalPages;$('noReports').hidden=reports.length>0;
 }
-function renderRows() {
-  $('rows').replaceChildren();
-  for(const row of state.rows) {
-    const card = element('article', undefined, `row${row.include ? '' : ' excluded'}${selected===row.id?' selected':''}`); card.dataset.id=row.id;
-    const top = element('div',undefined,'row-top');
-    const include = element('label',''); const checkbox = document.createElement('input'); checkbox.type='checkbox';checkbox.checked=row.include;
-    checkbox.addEventListener('change',()=>{row.include=checkbox.checked;resetCoverage();renderRows();}); include.append(checkbox,document.createTextNode('Include'));top.append(include,element('span',`${row.fileName || 'Manual'} · p.${row.page || '—'}`,'source'));
-    const sourceButton=element('button','View source','secondary');sourceButton.addEventListener('click',()=>showSource(row));top.append(sourceButton);card.append(top);
-    const fields=element('div',undefined,'row-fields');
-    const invalidate = (key,value)=> {row[key]=value;row.reviewed=false;card.querySelector('.review-check input').checked=false;resetCoverage();updateProgress();};
-    for(const [key,label,wide] of [['characteristic','Characteristic #'],['reference','Reference / units'],['quantity','Quantity'],['requirement','Requirement',true],['lower','Lower limit'],['upper','Upper limit'],['designator','Designator (verify)'],['resultMin','Measured min (optional)'],['resultMax','Measured max (optional)'],['comments','Comments',true]]) {
-      fields.append(field(key,label,row[key],value=>invalidate(key,value),wide));
+function renderDefinitions(){
+  $('definitionRows').replaceChildren();
+  for(const d of study.schema){const row=el('tr');for(const text of [d.number,d.id,d.axis,d.nominal,limit(d),limit(d,true),d.units])row.append(el('td',text));$('definitionRows').append(row);}
+}
+async function refresh(){
+  try{study=await api('/api/study');render();}
+  catch(error){message(error.message);}
+}
+function loadSettings(){for(const key of ['title','part','units'])$(key).value=study.metadata[key]||'';}
+async function upload(selected,retryId=null){
+  if(importing||exporting)return;
+  const files=[...selected].filter(f=>f.name.toLowerCase().endsWith('.pdf')).sort((a,b)=>(a.webkitRelativePath||a.name).localeCompare(b.webkitRelativePath||b.name,undefined,{numeric:true}));
+  if(!files.length)return message('No PDFs found in the selected folder.');
+  if(!retryId && files.length+study.reports.length>5000)return message('Split this batch: each study supports up to 5,000 PDF reports.');
+  importing=true;$('folder').disabled=true;$('files').disabled=true;$('uploadProgress').hidden=false;render();
+  let accepted=0, failed=0;
+  for(const [index,file] of files.entries()){
+    const name=file.webkitRelativePath||file.name;
+    $('uploadBar').value=100*index/files.length;$('uploadLabel').textContent=`Uploading ${index+1} of ${files.length} · ${name}`;
+    try{
+      const headers={'Content-Type':'application/pdf','X-File-Name':encodeURIComponent(name)};if(retryId)headers['X-Retry-Id']=retryId;
+      const report=await api('/api/reports',{method:'POST',headers,body:file});fileCache.set(report.id,file);accepted++;
+    }catch(error){failed++;message(`Upload failed: ${name} — ${error.message}. Failed entries remain in Serial results.`);}
+    await refresh();
+  }
+  importing=false;$('folder').disabled=false;$('files').disabled=false;$('uploadBar').value=100;$('uploadLabel').textContent=`${accepted} uploaded · ${failed} upload errors · extraction continues in the queue.`;
+  message(`Folder import finished: ${accepted} PDF(s) queued. Open Serial results to follow processing and retry failures.`);render();showView('reports');
+}
+$('folder').addEventListener('change',event=>{upload(event.target.files);event.target.value='';});
+$('files').addEventListener('change',event=>{upload(event.target.files);event.target.value='';});
+$('search').addEventListener('input',()=>{page=1;renderReports();});$('filter').addEventListener('change',()=>{page=1;renderReports();});
+$('prev').addEventListener('click',()=>{page--;renderReports();});$('next').addEventListener('click',()=>{page++;renderReports();});
+$('saveSettings').addEventListener('click',async()=>{try{study=await patch('/api/study',{metadata:Object.fromEntries(['title','part','units'].map(k=>[k,$(k).value]))});message('Study details saved locally.');}catch(error){message(error.message);}});
+$('pause').addEventListener('click',async()=>{try{study=await patch('/api/study',{paused:!study.paused});render();}catch(error){message(error.message);}});
+$('newStudy').addEventListener('click',async()=>{
+  if(!confirm('Start a new study? Export the current workbook first. Previous source files remain on disk, but the app will open the new study.'))return;
+  try{study=await api('/api/new',{method:'POST'});fileCache.clear();page=1;loadSettings();render();renderDefinitions();$('referenceName').textContent='110780-001 MAJORS · supplied column definitions';showView('overview');message('New study created. Set the part details and reference before importing.');}catch(error){message(error.message);}
+});
+$('reference').addEventListener('change',async event=>{
+  const file=event.target.files[0];if(!file)return;
+  try{const result=await api('/api/reference',{method:'POST',headers:{'X-File-Name':encodeURIComponent(file.name)},body:file});await refresh();renderDefinitions();message(`Loaded ${result.count} characteristic definitions. Historical serial values were not imported.`);}catch(error){message(error.message);}finally{event.target.value='';}
+});
+function showEvidence(d){
+  const reading=detail.values[d.id];$('evidence').textContent=reading?`${d.id}\nPage ${reading.page||'manual'} · ${reading.method||'Manual entry'}\n${reading.source||'No extracted source text.'}\n${(reading.flags||[]).join('\n')}`:`${d.id}\nMissing: no unambiguous measurement was extracted. Enter a value only after checking the source PDF.`;
+  $('pdf').src=`/pdf/${detail.id}#page=${reading?.page||1}&view=FitH`;
+}
+async function openReport(id){
+  try{
+    detail=await api(`/api/reports/${id}`);edited.clear();$('detailTitle').textContent=detail.name;$('serial').value=detail.serial;$('excluded').checked=!!detail.excluded;$('detailMessage').textContent='Changes are saved only when you click Save.';
+    const duplicate=study.reports.filter(r=>r.serial&&r.serial===detail.serial).length>1;
+    $('warnings').textContent=[...detail.warnings,`${study.schema.length-detail.matched} missing measurements.`,...duplicate?['Duplicate serial / rerun: kept as a separate report.']:[],...detail.duplicateOf?[`Identical PDF content: ${detail.duplicateOf}`]:[]].join(' ');
+    $('measurementRows').replaceChildren();
+    for(const d of study.schema){
+      const reading=detail.values[d.id],row=el('tr'),label=el('td',d.id);label.tabIndex=0;label.addEventListener('click',()=>showEvidence(d));label.addEventListener('keydown',event=>{if(event.key==='Enter')showEvidence(d);});row.append(label);
+      const valueCell=el('td'),input=document.createElement('input');input.type='number';input.step='any';input.value=reading?.value??'';input.setAttribute('aria-label',`Measured ${d.id}`);
+      input.addEventListener('input',()=>{const change=edited.get(d.id)||{};edited.set(d.id,{...change,value:input.value});$('detailMessage').textContent='Unsaved edits. Saving changes resets this report’s review.';});valueCell.append(input);row.append(valueCell,el('td',`${limit(d)} … ${limit(d,true)}`));
+      row.append(el('td',!reading||reading.value===null?'Missing':reading.flags?.length?'Check mapping':detail.reviewed?'Reviewed':'Unreviewed'));
+      const flagCell=el('td');if(reading?.flags?.length){const clear=document.createElement('input');clear.type='checkbox';clear.setAttribute('aria-label',`Clear flag ${d.id}`);clear.addEventListener('change',()=>{const change=edited.get(d.id)||{value:reading.value};edited.set(d.id,{...change,clearFlags:clear.checked});});flagCell.append(clear);}row.append(flagCell);$('measurementRows').append(row);
     }
-    card.append(fields);
-    const reviewed=element('label',undefined,'review-check');const check=document.createElement('input');check.type='checkbox';check.checked=row.reviewed;
-    check.addEventListener('change',()=>{row.reviewed=check.checked;updateProgress();});reviewed.append(check,document.createTextNode('I verified this row against the source, including units and limits.'));card.append(reviewed);$('rows').append(card);
-  }
-  updateProgress();
+    $('rawPages').replaceChildren();
+    for(const unmatched of detail.unmatched||[]) $('rawPages').append(el('pre',`Page ${unmatched.page}: ${unmatched.reason}\n${unmatched.source}`));
+    for(const p of detail.pages||[]){const section=document.createElement('details');section.append(el('summary',`Page ${p.page} · ${p.method}`),el('pre',p.text));$('rawPages').append(section);}
+    if(study.schema[0])showEvidence(study.schema[0]);if(!$('detail').open)$('detail').showModal();
+  }catch(error){message(error.message);}
 }
-$('coverage').addEventListener('change',()=>state.coverageConfirmed=$('coverage').checked);
-$('files').addEventListener('change',async event=>{
-  if(scanning)return;
-  const files=[...event.target.files];scanning=true;$('export').disabled=true;$('add').disabled=true;$('restore').disabled=true;
-  let failed=0;
-  try {for(const [index,file] of files.entries()) {
-    status(`Scanning ${index+1}/${files.length}: ${file.name}. Local OCR may take a few minutes…`);
-    try {
-      const response=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});
-      const result=await response.json();if(!response.ok)throw new Error(result.error);
-      state.documents.push({id:result.id,name:file.name,sourceUrl:`/pdf/${result.id}`,pages:result.pages,warnings:result.warnings});
-      for(const row of result.rows) state.rows.push({...row,id:crypto.randomUUID(),documentId:result.id,fileName:file.name});
-      resetCoverage();renderRows();
-      if(state.rows.length && !selected)showSource(state.rows[0]);
-    } catch(error){failed++;state.documents.push({id:crypto.randomUUID(),name:file.name,pages:[],warnings:[`SCAN FAILED: ${error.message}. No content was extracted. Retry this file before confirming coverage.`]});renderRows();alert(`${file.name}: ${error.message}`);}
-  }
-  status(`Batch complete: ${files.length-failed}/${files.length} PDFs scanned. ${failed?'Some files failed; retry them. ':''}Review all pages and add missing characteristics manually.`);
-  } finally {scanning=false;event.target.value='';$('export').disabled=false;$('add').disabled=false;$('restore').disabled=false;}
-});
-$('add').addEventListener('click',()=>{
-  const row={id:crypto.randomUUID(),include:true,reviewed:false,characteristic:'',requirement:'',reference:'',source:'Manual entry'};state.rows.push(row);resetCoverage();renderRows();showSource(row);$('rows').lastElementChild?.scrollIntoView({behavior:'smooth',block:'center'});
-});
-function download(blob,name) { const url=URL.createObjectURL(blob);const link=element('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000); }
-$('save').addEventListener('click',()=>{
-  const saved={...state,version:1,documents:state.documents.map(({sourceUrl,...document})=>document)};
-  download(new Blob([JSON.stringify(saved,null,2)],{type:'application/json'}),'local-fai-review.json');status('Review saved. Keep the original PDFs with this file; PDFs are not embedded in review JSON.');
-});
-$('restore').addEventListener('change',async event=>{
-  try {
-    const file=event.target.files[0];if(!file)return;if(file.size>8*1024*1024)throw new Error('Review file exceeds 8 MB.');
-    const saved=JSON.parse(await file.text());if(saved.version!==1 || !Array.isArray(saved.rows) || !Array.isArray(saved.documents) || typeof saved.metadata!=='object' || saved.metadata===null)throw new Error('Not a supported Local FAI review file.');
-    if(state.rows.length && !confirm('Replace the current review? Save it first if needed.'))return;
-    state={metadata:saved.metadata,rows:saved.rows,documents:saved.documents.map(({sourceUrl,...d})=>d),coverageConfirmed:false};selected=null;renderMetadata();renderRows();resetCoverage();if(state.rows.length)showSource(state.rows[0]);status('Review opened. Reconnect source PDFs and verify coverage before export.');
-  }catch(error){status(error.message);}finally{event.target.value='';}
-});
+async function saveReport(reviewed){
+  $('saveReport').disabled=true;$('confirmReview').disabled=true;
+  try{
+    const serial=$('serial').value.trim();if(!serial)throw new Error('Enter a serial number.');
+    const payload={excluded:$('excluded').checked,reviewed};if(serial!==detail.serial)payload.serial=serial;if(edited.size)payload.values=Object.fromEntries(edited);
+    await patch(`/api/reports/${detail.id}`,payload);await refresh();await openReport(detail.id);$('detailMessage').textContent=reviewed?'Report marked reviewed. Missing measurements and remaining flags are still listed.':'Changes saved; report needs review.';
+  }catch(error){$('detailMessage').textContent=error.message;}finally{$('saveReport').disabled=false;$('confirmReview').disabled=false;}
+}
+$('saveReport').addEventListener('click',()=>saveReport(false));$('confirmReview').addEventListener('click',()=>saveReport(true));
+function closeDetail(event){const dirty=edited.size||(detail&&($('serial').value!==detail.serial||$('excluded').checked!==!!detail.excluded));if(dirty&&!confirm('Discard unsaved report edits?')){event?.preventDefault();return;}$('detail').close();detail=null;edited.clear();$('pdf').removeAttribute('src');}
+$('closeDetail').addEventListener('click',closeDetail);$('detail').addEventListener('cancel',event=>{event.preventDefault();closeDetail();});
 $('export').addEventListener('click',async()=>{
-  const rows=state.rows.filter(row=>row.include);
-  if(!rows.length || rows.some(row=>!row.reviewed || !String(row.characteristic||'').trim() || !String(row.requirement||'').trim()))return status('Each included row needs a characteristic number, a requirement, and review confirmation.');
-  if(!state.coverageConfirmed)return status('Confirm you reviewed every source page for omissions before exporting.');
-  $('export').disabled=true;status('Building your draft workbook…');
-  try {const response=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});if(!response.ok)throw new Error((await response.json()).error);download(await response.blob(),'AS9102-reviewed-draft.xlsx');status('Draft workbook exported. Complete materials, processes, and authorization in Excel.');}
-  catch(error){status(error.message);}finally{$('export').disabled=false;}
+  if(!study)return;exporting=true;render();message('Building the workbook from every included report…');
+  try{
+    const response=await fetch('/api/export',{method:'POST'});if(!response.ok)throw new Error((await response.json()).error);
+    const url=URL.createObjectURL(await response.blob()),link=el('a');link.href=url;link.download='Part-study-results.xlsx';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('Excel workbook exported. Unreviewed results, failed reports, duplicates, and missing values are documented.');
+  }catch(error){message(error.message);}finally{exporting=false;render();}
 });
-renderMetadata();renderRows();
+await refresh();if(study){loadSettings();renderDefinitions();message('Study restored from local storage. Select a folder to add reports.');}
+setInterval(refresh,2000);

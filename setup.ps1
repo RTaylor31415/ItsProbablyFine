@@ -12,4 +12,4 @@ if (-not (Test-Path '.venv/Scripts/python.exe')) {
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 & ./.venv/Scripts/python.exe -m unittest discover -s tests -v
 if ($LASTEXITCODE -ne 0) { throw 'Validation failed.' }
-Write-Host 'Setup complete. Run .\start.ps1 to launch Local FAI.'
+Write-Host 'Setup complete. Run .\start.ps1 to launch Part Study.'

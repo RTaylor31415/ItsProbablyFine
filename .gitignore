@@ -2,3 +2,4 @@
 .local-fai/
 __pycache__/
 *.pyc
+.part-study/
