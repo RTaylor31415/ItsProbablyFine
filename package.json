@@ -1,0 +1,11 @@
+{
+  "name": "local-fai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline PDF characteristic review and AS9102 workbook export",
+  "scripts": {
+    "start": "node app/server.mjs",
+    "test": "python -m unittest discover -s tests -v"
+  },
+  "engines": { "node": ">=22" }
+}

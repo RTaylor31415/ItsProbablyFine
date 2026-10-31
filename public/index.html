@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local FAI · PDF to AS9102</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header><a class="brand" href="/">Local <b>FAI</b></a><span class="pill">● Entirely local</span><span class="subtitle">PDF → review → AS9102</span></header>
+<main>
+<div class="intro"><div><span class="eyebrow">CHARACTERISTIC WORKSPACE</span><h1>From inspection PDFs<br>to a reviewable first article.</h1><p>Read local documents, verify each requirement, and populate your JEMCO AS9102 template.</p></div><div class="step-list"><span>01 &nbsp; Import PDFs</span><span>02 &nbsp; Verify requirements</span><span>03 &nbsp; Export draft workbook</span></div></div>
+<section class="import-panel"><div><h2>Start with your source documents</h2><p>Batch import PDFs up to 50 MB and 200 pages each. OCR runs on this computer.</p></div><label class="button">Choose PDFs<input id="files" type="file" accept="application/pdf,.pdf" multiple hidden></label><button id="save" class="secondary">Save review</button><label class="button secondary">Open review<input id="restore" type="file" accept="application/json,.json" hidden></label></section>
+<p id="status" role="status" aria-live="polite">Ready to import. No files leave this computer.</p>
+<div id="documents" class="documents"></div>
+<div class="notice"><b>Review required.</b> OCR proposes candidates; it does not establish completeness or conformance. Check all pages for omitted dimensions, GD&T, datums, units, and general tolerances. Results remain blank unless you enter them.</div>
+<section class="metadata"><h2>Report details</h2><p>Enter verified identifiers. Imported files are combined into one part’s report; use a separate review for each part.</p><div id="metadata" class="fields"></div></section>
+<div class="workspace">
+<section class="review"><div class="section-title"><div><h2>Characteristics <span id="count">0</span></h2><p id="progress">No candidates yet</p></div><button id="add" class="secondary">+ Add manually</button></div><div id="rows"></div><div id="empty">Your review starts here.<small>Import a PDF to find candidates, or add a requirement manually.</small></div></section>
+<aside><div class="section-title"><h2>Source evidence</h2></div><p id="sourceLabel">Select a characteristic to inspect its source.</p><iframe id="pdf" title="Source PDF page" hidden></iframe><p id="sourceHelp" class="muted"></p><pre id="evidence">No characteristic selected.</pre><details><summary>Full extracted page text & scan warnings</summary><div id="pages"></div></details></aside>
+</div>
+<section class="export-panel"><div><h2>Build the AS9102 workbook</h2><p>Forms 1–3, draft CofC, and an extraction audit sheet. Additional Form 3 sheets are created after 99 rows.</p><label class="coverage"><input type="checkbox" id="coverage"> I reviewed every source page for omitted characteristics and confirmed this report covers a single part.</label></div><button id="export">Export reviewed draft</button></section>
+<footer>Local FAI · Prototype · No automatic approval, signatures, or certification. Save your review before closing or refreshing.</footer>
+</main><script src="/app.js" type="module"></script>
+</body></html>
